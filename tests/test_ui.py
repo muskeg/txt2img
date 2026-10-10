@@ -1,0 +1,102 @@
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+import gradio as gr
+import pytest
+
+from txt2img import pipeline, ui
+from txt2img.config import GiB
+
+
+@pytest.fixture(autouse=True)
+def isolated_ui(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(ui, "_generator", None)
+    monkeypatch.setattr(ui, "OUTPUT_DIR", tmp_path)
+
+
+def generate(model: str = "sdxl", **overrides):
+    args = {
+        "prompt": "a cat",
+        "model": model,
+        "aspect": "1:1",
+        "seed": 3,
+        "steps": 20,
+        "count": 1,
+        "placement": "auto",
+        "quantization": "none",
+    }
+    return ui.generate_images(**(args | overrides))
+
+
+def test_generates_saves_and_returns_captioned_images(fake_pipe: MagicMock, tmp_path: Path) -> None:
+    gallery, memory = generate(count=2)
+
+    assert [caption for _, caption in gallery] == ["seed 3", "seed 4"]
+    assert len(list(tmp_path.glob("*.png"))) == 2
+    assert fake_pipe.call_args.kwargs["num_inference_steps"] == 20
+    assert "**Loaded sdxl (gpu)**" in memory
+    assert "**Peak during generation**" in memory
+
+
+def test_vram_overflow_warning_is_bold(fake_pipe: MagicMock, fake_cuda: SimpleNamespace) -> None:
+    fake_cuda.peak = 31 * GiB
+
+    _, memory = generate()
+
+    assert "**WARNING: VRAM limit exceeded by 1.0 GiB" in memory
+
+
+def test_negative_seed_means_random(fake_pipe: MagicMock) -> None:
+    [(_, caption)], _ = generate(seed=-1)
+
+    assert 0 <= int(caption.removeprefix("seed ")) < 2**32
+
+
+def test_steps_ignored_for_qwen_turbo(fake_pipe: MagicMock) -> None:
+    generate("qwen-image-2.1-turbo", steps=40)
+
+    assert "num_inference_steps" not in fake_pipe.call_args.kwargs
+
+
+def test_reuses_loaded_model_and_reloads_when_settings_change(fake_pipe: MagicMock) -> None:
+    generate("sdxl")
+    generate("sdxl")
+    generate("sdxl", quantization="4bit")
+    generate("sdxl", quantization="4bit", placement="offload")
+    generate("z-image-turbo", quantization="4bit", placement="offload")
+
+    loaded = [c.args[0] for c in pipeline.DiffusionPipeline.from_pretrained.call_args_list]
+    assert loaded == [
+        "stabilityai/stable-diffusion-xl-base-1.0",
+        "stabilityai/stable-diffusion-xl-base-1.0",
+        "stabilityai/stable-diffusion-xl-base-1.0",
+        "Tongyi-MAI/Z-Image-Turbo",
+    ]
+
+
+def test_uses_models_dir_from_environment(
+    fake_pipe: MagicMock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TXT2IMG_MODELS_DIR", str(tmp_path / "models"))
+
+    generate()
+
+    assert pipeline.DiffusionPipeline.from_pretrained.call_args.kwargs["cache_dir"] == (
+        tmp_path / "models"
+    )
+
+
+def test_empty_prompt_is_rejected(fake_pipe: MagicMock) -> None:
+    with pytest.raises(gr.Error):
+        generate(prompt="  ")
+
+
+def test_steps_slider_follows_model() -> None:
+    assert ui._steps_slider("sdxl").interactive is True
+    assert ui._steps_slider("sdxl").value == 50
+    assert ui._steps_slider("qwen-image-2.1-turbo").interactive is False
+
+
+def test_ui_builds() -> None:
+    assert isinstance(ui.build_ui(), gr.Blocks)

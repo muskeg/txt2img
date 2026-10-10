@@ -1,0 +1,52 @@
+[project]
+name = "txt2img"
+version = "0.1.0"
+description = "Generate images from text prompts with open-weight diffusers models"
+authors = [
+    { name = "muskeg", email = "the.small.swamp@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "accelerate>=1.15.0",
+    "bitsandbytes>=0.50.2",
+    "diffusers",
+    "gradio>=6.30.0",
+    "pillow>=12.3.0",
+    "torch>=2.14.1",
+    "transformers>=5.17",
+    "typer>=0.27.3",
+]
+
+[project.scripts]
+txt2img = "txt2img.cli:app"
+txt2img-ui = "txt2img.ui:main"
+
+[build-system]
+requires = ["uv_build>=0.13.0,<0.14.0"]
+build-backend = "uv_build"
+
+[[tool.uv.index]]
+name = "pytorch-cu132"
+url = "https://download.pytorch.org/whl/cu132"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu132" }]
+diffusers = { git = "https://github.com/huggingface/diffusers" }
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.17.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-m 'not gpu'"
+markers = ["gpu: needs a CUDA GPU and downloads model weights (run with -m gpu)"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

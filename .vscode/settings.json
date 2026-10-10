@@ -1,0 +1,6 @@
+{
+    "terminal.integrated.env.linux": {
+        "UV_PROJECT_ENVIRONMENT": "${env:HOME}/.venvs/txt2img"
+    },
+    "python.defaultInterpreterPath": "${env:HOME}/.venvs/txt2img/bin/python"
+}
