@@ -41,7 +41,17 @@ class ModelPreset:
     call_kwargs: dict[str, object] = field(default_factory=dict)
     variant: str | None = None
     gated: bool = False
+    # Native RGBA output, prompted with TRANSPARENT_TEMPLATE.
+    transparency: bool = False
+    # Accepts reference images (`image=`), which animation frames are edited from.
+    editing: bool = False
 
+
+# Recommended prompt format from the Qwen-Image-2.1 README.
+TRANSPARENT_TEMPLATE = (
+    "This is an RGBA image with transparency. {prompt}. "
+    "The image has alpha channel and the background is transparent."
+)
 
 # Steps and guidance come from each model card, or the pipeline defaults when the card has none.
 MODELS: dict[str, ModelPreset] = {
@@ -67,6 +77,8 @@ MODELS: dict[str, ModelPreset] = {
         QWEN_RESOLUTIONS,
         default_steps=40,
         quantizable=("transformer", "text_encoder"),
+        transparency=True,
+        editing=True,
     ),
     "qwen-image-2.1-turbo": ModelPreset(
         "Qwen/Qwen-Image-2.1-Turbo",
@@ -74,6 +86,8 @@ MODELS: dict[str, ModelPreset] = {
         QWEN_RESOLUTIONS,
         default_steps=None,
         quantizable=("transformer", "text_encoder"),
+        transparency=True,
+        editing=True,
     ),
     "flux.1-schnell": ModelPreset(
         "black-forest-labs/FLUX.1-schnell",
@@ -131,6 +145,7 @@ MODELS: dict[str, ModelPreset] = {
     ),
 }
 DEFAULT_MODEL = "z-image-turbo"
+DEFAULT_EDIT_MODEL = "qwen-image-2.1-turbo"
 
 
 class Placement(StrEnum):

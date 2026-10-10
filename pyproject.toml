@@ -13,12 +13,14 @@ dependencies = [
     "gradio>=6.30.0",
     "pillow>=12.3.0",
     "torch>=2.14.1",
+    "torchvision",
     "transformers>=5.17",
     "typer>=0.27.3",
 ]
 
 [project.scripts]
 txt2img = "txt2img.cli:app"
+txt2img-animate = "txt2img.cli:animate_app"
 txt2img-ui = "txt2img.ui:main"
 
 [build-system]
@@ -32,6 +34,7 @@ explicit = true
 
 [tool.uv.sources]
 torch = [{ index = "pytorch-cu132" }]
+torchvision = [{ index = "pytorch-cu132" }]
 diffusers = { git = "https://github.com/huggingface/diffusers" }
 
 [dependency-groups]

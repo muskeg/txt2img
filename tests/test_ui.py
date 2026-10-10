@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 
 import gradio as gr
 import pytest
+from PIL import Image
 
 from txt2img import pipeline, ui
 from txt2img.config import GiB
@@ -23,6 +24,7 @@ def generate(model: str = "sdxl", **overrides):
         "seed": 3,
         "steps": 20,
         "count": 1,
+        "transparent": False,
         "placement": "auto",
         "quantization": "none",
     }
@@ -92,10 +94,93 @@ def test_empty_prompt_is_rejected(fake_pipe: MagicMock) -> None:
         generate(prompt="  ")
 
 
-def test_steps_slider_follows_model() -> None:
-    assert ui._steps_slider("sdxl").interactive is True
-    assert ui._steps_slider("sdxl").value == 50
-    assert ui._steps_slider("qwen-image-2.1-turbo").interactive is False
+def test_transparent_only_for_supporting_models(fake_pipe: MagicMock) -> None:
+    with pytest.raises(gr.Error, match="transparent"):
+        generate("sdxl", transparent=True)
+
+    generate("qwen-image-2.1-turbo", transparent=True)
+
+    assert fake_pipe.call_args.kwargs["prompt"].startswith("This is an RGBA image")
+
+
+def test_controls_follow_model() -> None:
+    steps, transparent = ui._model_controls("sdxl")
+    assert (steps.interactive, steps.value, transparent.interactive) == (True, 50, False)
+
+    steps, transparent = ui._model_controls("qwen-image-2.1-turbo")
+    assert (steps.interactive, transparent.interactive) == (False, True)
+
+
+def test_mask_from_editor_merges_painted_layers() -> None:
+    first = Image.new("RGBA", (10, 10), (0, 0, 0, 0))
+    first.putpixel((1, 1), (255, 255, 255, 120))
+    second = Image.new("RGBA", (10, 10), (0, 0, 0, 0))
+    second.putpixel((8, 8), (255, 255, 255, 255))
+
+    mask = ui.mask_from_editor({"background": None, "layers": [first, second]})
+
+    assert (mask.getpixel((1, 1)), mask.getpixel((8, 8)), mask.getpixel((5, 5))) == (255, 255, 0)
+
+
+@pytest.mark.parametrize(
+    "value", [None, {"layers": []}, {"layers": [Image.new("RGBA", (4, 4), (0, 0, 0, 0))]}]
+)
+def test_mask_from_editor_without_paint_is_none(value: dict | None) -> None:
+    assert ui.mask_from_editor(value) is None
+
+
+def animate(editor: dict | None, **overrides):
+    args = {
+        "editor": editor,
+        "model": "qwen-image-2.1-turbo",
+        "frame_text": "",
+        "motion": "the flame flickers",
+        "frame_count": 3,
+        "source": "base",
+        "feather": 0,
+        "fps": 8,
+        "formats": ["webp", "gif"],
+        "seed": 5,
+        "steps": 40,
+        "transparent": False,
+        "placement": "auto",
+        "quantization": "none",
+    }
+    return ui.animate_images(**(args | overrides))
+
+
+def test_animate_returns_preview_frames_and_files(
+    fake_pipe: MagicMock, small_qwen: None, tmp_path: Path
+) -> None:
+    layer = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+    layer.paste((255, 255, 255, 255), (0, 0, 32, 32))
+    editor = {"background": Image.new("RGBA", (64, 64), "red"), "layers": [layer]}
+
+    preview, frames, files, memory = animate(editor)
+
+    assert preview.endswith("animation.webp") and Path(preview).exists()
+    assert [caption for _, caption in frames] == [
+        "frame 1 - seed 5",
+        "frame 2 - seed 6",
+        "frame 3 - seed 7",
+    ]
+    assert [Path(f).name for f in files] == ["animation.webp", "animation.gif"]
+    assert frames[0][0].getpixel((60, 60)) == (255, 0, 0, 255)  # outside the mask: base
+    assert "Peak during generation" in memory
+
+
+def test_animate_needs_a_base_image(fake_pipe: MagicMock) -> None:
+    with pytest.raises(gr.Error, match="base image"):
+        animate({"background": None, "layers": []})
+
+
+def test_generate_base_fills_the_editor(fake_pipe: MagicMock, small_qwen: None) -> None:
+    value, _ = ui.generate_base(
+        "a candle", "qwen-image-2.1-turbo", "1:1", 1, 40, False, "auto", "none"
+    )
+
+    assert value["background"] is value["composite"]
+    assert value["layers"] == []
 
 
 def test_ui_builds() -> None:

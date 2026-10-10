@@ -225,3 +225,46 @@ def test_save_image_writes_png_with_metadata(tmp_path: Path) -> None:
             "steps": "50",
             "quantization": "4bit",
         }
+
+
+def test_transparent_wraps_prompt_in_rgba_template(fake_pipe: MagicMock) -> None:
+    [result] = (
+        ImageGenerator("qwen-image-2.1").generate("A dragon sticker.", transparent=True).images
+    )
+
+    assert fake_pipe.call_args.kwargs["prompt"] == (
+        "This is an RGBA image with transparency. A dragon sticker. "
+        "The image has alpha channel and the background is transparent."
+    )
+    assert (result.prompt, result.transparent) == ("A dragon sticker.", True)
+
+
+def test_transparent_rejected_for_models_without_alpha(fake_pipe: MagicMock) -> None:
+    with pytest.raises(ValueError, match="transparent"):
+        ImageGenerator("sdxl").generate("a cat", transparent=True)
+
+
+def test_reference_images_are_passed_to_editing_models(fake_pipe: MagicMock) -> None:
+    reference = Image.new("RGBA", (8, 8))
+
+    ImageGenerator("qwen-image-2.1-turbo").generate("make it night", images=[reference])
+
+    assert fake_pipe.call_args.kwargs["image"] == [reference]
+
+
+def test_reference_images_rejected_for_text_only_models(fake_pipe: MagicMock) -> None:
+    with pytest.raises(ValueError, match="reference images"):
+        ImageGenerator("sdxl").generate("a cat", images=[Image.new("RGB", (8, 8))])
+
+
+def test_save_image_records_transparency_and_custom_name(tmp_path: Path) -> None:
+    result = GeneratedImage(
+        Image.new("RGBA", (8, 8)), "a cat", "qwen-image-2.1", 1, 40, transparent=True
+    )
+
+    path = save_image(result, tmp_path, name="frame_01.png")
+
+    assert path == tmp_path / "frame_01.png"
+    with Image.open(path) as saved:
+        assert saved.mode == "RGBA"
+        assert saved.text["transparent"] == "true"

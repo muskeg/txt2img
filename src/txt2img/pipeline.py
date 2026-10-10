@@ -13,6 +13,7 @@ from PIL.PngImagePlugin import PngInfo
 from txt2img.config import (
     DEFAULT_ASPECT,
     MODELS,
+    TRANSPARENT_TEMPLATE,
     VRAM_HEADROOM,
     GiB,
     ModelPreset,
@@ -81,6 +82,7 @@ class GeneratedImage:
     seed: int
     steps: int | None
     quantization: Quantization = Quantization.NONE
+    transparent: bool = False
 
 
 @dataclass(frozen=True)
@@ -184,13 +186,22 @@ class ImageGenerator:
         seed: int | None = None,
         steps: int | None = None,
         count: int = 1,
+        transparent: bool = False,
+        images: list[Image.Image] | None = None,
     ) -> Generation:
-        """Generate `count` images; image i uses seed + i so each one can be reproduced alone."""
+        """Generate `count` images; image i uses seed + i so each one can be reproduced alone.
+
+        `images` are reference images the model edits from (editing models only).
+        """
         resolutions = self.preset.resolutions
         if aspect not in resolutions:
             raise ValueError(f"Unknown aspect {aspect!r}, expected one of {list(resolutions)}")
         if count < 1:
             raise ValueError("count must be at least 1")
+        if transparent and not self.preset.transparency:
+            raise ValueError(f"The {self.model} model can't generate transparent images.")
+        if images and not self.preset.editing:
+            raise ValueError(f"The {self.model} model doesn't accept reference images.")
         if steps is not None:
             if self.preset.default_steps is None:
                 raise ValueError(
@@ -205,31 +216,44 @@ class ImageGenerator:
         call_kwargs = dict(self.preset.call_kwargs)
         if steps is not None:
             call_kwargs["num_inference_steps"] = steps
+        if images:
+            call_kwargs["image"] = images
+        model_prompt = (
+            TRANSPARENT_TEMPLATE.format(prompt=prompt.strip().rstrip("."))
+            if transparent
+            else prompt
+        )
 
         torch.cuda.reset_peak_memory_stats()
-        images = []
+        images_out = []
         for i in range(count):
             image_seed = base_seed + i
             output = self.pipe(
-                prompt=prompt,
+                prompt=model_prompt,
                 width=width,
                 height=height,
                 generator=torch.Generator("cpu").manual_seed(image_seed),
                 **call_kwargs,
             )
-            images.append(
+            images_out.append(
                 GeneratedImage(
-                    output.images[0], prompt, self.model, image_seed, steps, self.quantization
+                    image=output.images[0],
+                    prompt=prompt,
+                    model=self.model,
+                    seed=image_seed,
+                    steps=steps,
+                    quantization=self.quantization,
+                    transparent=transparent,
                 )
             )
-        return Generation(images, self._memory_report(torch.cuda.max_memory_reserved()))
+        return Generation(images_out, self._memory_report(torch.cuda.max_memory_reserved()))
 
 
-def save_image(result: GeneratedImage, output_dir: Path) -> Path:
+def save_image(result: GeneratedImage, output_dir: Path, name: str | None = None) -> Path:
     """Save as PNG with the generation parameters embedded as text metadata."""
     output_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    path = output_dir / f"{timestamp}_{result.model}_{result.seed}.png"
+    path = output_dir / (name or f"{timestamp}_{result.model}_{result.seed}.png")
     info = PngInfo()
     info.add_text("prompt", result.prompt)
     info.add_text("model", MODELS[result.model].repo_id)
@@ -238,5 +262,7 @@ def save_image(result: GeneratedImage, output_dir: Path) -> Path:
         info.add_text("steps", str(result.steps))
     if result.quantization != Quantization.NONE:
         info.add_text("quantization", result.quantization.value)
+    if result.transparent:
+        info.add_text("transparent", "true")
     result.image.save(path, pnginfo=info)
     return path

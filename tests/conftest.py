@@ -1,3 +1,4 @@
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -6,7 +7,16 @@ import torch
 from PIL import Image
 
 from txt2img import pipeline
-from txt2img.config import GiB
+from txt2img.config import MODELS, GiB
+
+SMALL_RESOLUTIONS = {"1:1": (64, 64), "16:9": (128, 72)}
+
+
+@pytest.fixture
+def small_qwen(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Shrink the Qwen resolutions so animation tests don't composite 2048 px frames."""
+    for name in ("qwen-image-2.1", "qwen-image-2.1-turbo"):
+        monkeypatch.setitem(MODELS, name, replace(MODELS[name], resolutions=SMALL_RESOLUTIONS))
 
 
 @pytest.fixture
