@@ -6,7 +6,7 @@ Update this file when a convention changes or a new pitfall turns up.
 ## Stack
 - Python 3.12, managed with **uv** (`pyproject.toml` + `uv.lock`, no `requirements.txt`). If `uv` is missing, install it with `curl -LsSf https://astral.sh/uv/install.sh | sh`.
 - Always run code inside the project virtual environment, through `uv run` or `uv add`. Never install packages with `pip` or into the system Python.
-- The venv lives at `~/.venvs/txt2img` (ext4), not in the repo. [.vscode/settings.json](.vscode/settings.json) sets `UV_PROJECT_ENVIRONMENT` for VS Code terminals. If a `.venv/` shows up in the repo, the variable wasn't set: delete it and use a new VS Code terminal or `export UV_PROJECT_ENVIRONMENT=~/.venvs/txt2img`.
+- The venv lives at `~/.venvs/txt2img` (ext4). The repo's `.venv` is a **symlink** to it, so uv finds it from any terminal; [.vscode/settings.json](.vscode/settings.json) also sets `UV_PROJECT_ENVIRONMENT`. If `.venv` is ever a real directory (uv creating packages on `/mnt/c`, "Failed to hardlink files" warning), delete it and run `ln -s ~/.venvs/txt2img .venv`.
 - `diffusers`, `transformers`, `accelerate`, PyTorch (CUDA).
 - CLI: Typer. Web UI: Gradio, bound to `127.0.0.1` only, as a thin layer over `pipeline.py`.
 - For Typer choice options, use `StrEnum` types. `click_type=click.Choice` prints a traceback on bad input instead of a usage error.
@@ -36,7 +36,8 @@ Update this file when a convention changes or a new pitfall turns up.
 - Animated WebP/APNG/GIF encoders merge identical consecutive frames, so use frames that differ in tests.
 
 ## Models
-- Presets in [config.py](src/txt2img/config.py): Z-Image (+Turbo, default), Qwen-Image-2.1 (+Turbo), FLUX.1-schnell, SD 3.5 Large/Large Turbo/Medium, SDXL, RealVisXL V5. Take steps, guidance and resolutions from each model card; a new model needs a preset, nothing else.
+- Presets in [config.py](src/txt2img/config.py): Z-Image (+Turbo, default), Qwen-Image-2.1 (+Turbo), FLUX.1-schnell, SD 3.5 Large/Large Turbo/Medium, SDXL, RealVisXL V5, plus uncensored community fine-tunes (3 SDXL, 1 FLUX.1-dev). Take steps, guidance and resolutions from each model card, or the pipeline defaults when the card has none; a new model needs a preset, nothing else.
+- `variant="fp16"` is fine when only some components ship fp16 files: diffusers loads the rest from the regular files.
 - Qwen-Image-2.1 and Z-Image need **diffusers from git** (`[tool.uv.sources]`; `uv.lock` pins the commit) and `transformers>=5.17`. Qwen's Qwen3-VL text encoder also needs `torchvision`, which comes from the same CUDA index as `torch`.
 - Qwen-Image-2.1-Turbo stores its sampling schedule in the checkpoint, so `num_inference_steps` does **not** change it (`default_steps=None`). Distilled models (Turbo, schnell) need guidance 0.
 - Qwen uses 2048-class resolutions; the others use ~1 MP buckets. Don't use arbitrary sizes.

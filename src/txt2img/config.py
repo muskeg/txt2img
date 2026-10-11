@@ -143,6 +143,43 @@ MODELS: dict[str, ModelPreset] = {
         call_kwargs={"guidance_scale": 5.0},
         variant="fp16",
     ),
+    # Community fine-tunes without content filtering in training.
+    "heartsync-nsfw": ModelPreset(
+        "Heartsync/NSFW-Uncensored",
+        "MIT",
+        MEGAPIXEL_RESOLUTIONS,
+        default_steps=30,
+        quantizable=("unet",),
+        call_kwargs={"guidance_scale": 7.5},
+        variant="fp16",
+    ),
+    "unfiltered-nsfw-v2": ModelPreset(
+        "UnfilteredAI/NSFW-gen-v2",
+        "Other (see model card)",
+        MEGAPIXEL_RESOLUTIONS,
+        default_steps=50,
+        quantizable=("unet",),
+        call_kwargs={"guidance_scale": 5.0},
+        # Only the UNet and VAE have fp16 files; diffusers loads the rest in full precision.
+        variant="fp16",
+    ),
+    "wai-nsfw-illustrious-v8": ModelPreset(
+        "John6666/wai-nsfw-illustrious-v80-sdxl",
+        "FAIPL-1.0-SD",
+        MEGAPIXEL_RESOLUTIONS,
+        default_steps=50,
+        quantizable=("unet",),
+        call_kwargs={"guidance_scale": 5.0},
+    ),
+    "fhdr-uncensored": ModelPreset(
+        "kpsss34/FHDR_Uncensored",
+        "FLUX.1-dev Non-Commercial",
+        MEGAPIXEL_RESOLUTIONS,
+        default_steps=40,
+        quantizable=("transformer", "text_encoder_2"),
+        call_kwargs={"guidance_scale": 4.0, "max_sequence_length": 512},
+        gated=True,
+    ),
 }
 DEFAULT_MODEL = "z-image-turbo"
 DEFAULT_EDIT_MODEL = "qwen-image-2.1-turbo"

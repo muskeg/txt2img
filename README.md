@@ -4,7 +4,7 @@ Generate images from text prompts with open-weight models, locally on an NVIDIA 
 
 ## Features
 
-- **10 model presets**: Z-Image and Z-Image-Turbo, Qwen-Image-2.1 and Qwen-Image-2.1-Turbo, FLUX.1-schnell, Stable Diffusion 3.5 (Large, Large Turbo, Medium), SDXL and RealVisXL V5. Each preset uses the steps, guidance and resolutions from its model card.
+- **14 model presets**: Z-Image and Z-Image-Turbo, Qwen-Image-2.1 and Qwen-Image-2.1-Turbo, FLUX.1-schnell, Stable Diffusion 3.5 (Large, Large Turbo, Medium), SDXL, RealVisXL V5, and four uncensored community fine-tunes (three SDXL, one FLUX.1-dev). Each preset uses the steps, guidance and resolutions from its model card.
 - **Automatic VRAM placement**: the whole model goes on the GPU when it fits; otherwise components are offloaded to system RAM and moved to the GPU only while they run. Optional 4-bit (NF4) quantization shrinks big models for smaller GPUs.
 - **Memory report**: shows what share of the weights sits in VRAM vs RAM and the peak VRAM use, and warns when VRAM overflows into system RAM. On WSL that overflow is silent and roughly 70x slower.
 - **Transparent images**: native RGBA output with the Qwen-Image-2.1 models.
@@ -51,7 +51,7 @@ uv sync
 | Variable | Purpose |
 |---|---|
 | `TXT2IMG_MODELS_DIR` | Where model weights are downloaded. Defaults to the Hugging Face cache (`~/.cache/huggingface`). Can be overridden per command with `--models-dir`. |
-| `UV_PROJECT_ENVIRONMENT` | Optional: put the virtual environment outside the repo. |
+| `UV_PROJECT_ENVIRONMENT` | Optional: put the virtual environment outside the repo (but see the WSL tip below). |
 
 ```bash
 # Example for ~/.bashrc
@@ -64,7 +64,11 @@ To use gated models, accept their license on their Hugging Face page, then log i
 uv run hf auth login
 ```
 
-On WSL, keep the virtual environment and model weights on the Linux filesystem (`~`), not under `/mnt/c` or `/mnt/d`. Reading files there is about 4x slower, which you'll notice every time a model loads.
+On WSL, keep the virtual environment and model weights on the Linux filesystem (`~`), not under `/mnt/c` or `/mnt/d`. Reading files there is about 4x slower, which you'll notice every time a model loads. If the repo itself is under `/mnt/c`, point `.venv` at a Linux-side environment. Then every terminal finds it, without any environment variable:
+
+```bash
+uv venv ~/.venvs/txt2img && ln -s ~/.venvs/txt2img .venv && uv sync
+```
 
 ## Usage
 
@@ -170,6 +174,10 @@ The UI keeps one model loaded between generations. It unloads it when you switch
 | `sd3.5-medium` | ~16 GB | yes | 40 | Gated, Stability Community License |
 | `sdxl` | 7.1 GB | yes | 50 | CreativeML Open RAIL++-M |
 | `realvisxl-v5` | 6.9 GB | yes | 50 | Photorealistic SDXL fine-tune, CreativeML Open RAIL++-M |
+| `heartsync-nsfw` | ~7 GB | yes | 30 | Uncensored SDXL fine-tune, MIT |
+| `unfiltered-nsfw-v2` | ~7 GB | yes | 50 | Uncensored SDXL fine-tune, custom license (see model card) |
+| `wai-nsfw-illustrious-v8` | 6.9 GB | yes | 50 | Uncensored anime SDXL (Illustrious), FAIPL-1.0-SD |
+| `fhdr-uncensored` | ~33.7 GB | no (offloads) | 40 | Uncensored FLUX.1-dev fine-tune. Gated, FLUX.1-dev non-commercial |
 
 Qwen models render at about 4 megapixels (2048×2048 for 1:1). The other presets render at about 1 megapixel (1024×1024 for 1:1). Check each model's license before any commercial use.
 

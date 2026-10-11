@@ -1,5 +1,6 @@
 outputs/
-.venv/
+# No trailing slash: .venv is a symlink to ~/.venvs/txt2img.
+.venv
 __pycache__/
 .pytest_cache/
 .ruff_cache/
