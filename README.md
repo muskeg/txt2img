@@ -4,7 +4,7 @@ Generate images from text prompts with open-weight models, locally on an NVIDIA 
 
 ## Features
 
-- **14 model presets**: Z-Image and Z-Image-Turbo, Qwen-Image-2.1 and Qwen-Image-2.1-Turbo, FLUX.1-schnell, Stable Diffusion 3.5 (Large, Large Turbo, Medium), SDXL, RealVisXL V5, and four uncensored community fine-tunes (three SDXL, one FLUX.1-dev). Each preset uses the steps, guidance and resolutions from its model card.
+- **16 model presets**: Z-Image and Z-Image-Turbo, Qwen-Image-2.1 and Qwen-Image-2.1-Turbo, FLUX.1-schnell, Stable Diffusion 3.5 (Large, Large Turbo, Medium), SDXL, RealVisXL V5, and six uncensored community fine-tunes (five SDXL, two of them photorealistic, and one FLUX.1-dev). Each preset uses the steps, guidance, sampler and resolutions from its model card.
 - **Automatic VRAM placement**: the whole model goes on the GPU when it fits; otherwise components are offloaded to system RAM and moved to the GPU only while they run. Optional 4-bit (NF4) quantization shrinks big models for smaller GPUs.
 - **Memory report**: shows what share of the weights sits in VRAM vs RAM and the peak VRAM use, and warns when VRAM overflows into system RAM. On WSL that overflow is silent and roughly 70x slower.
 - **Transparent images**: native RGBA output with the Qwen-Image-2.1 models.
@@ -178,6 +178,8 @@ The UI keeps one model loaded between generations. It unloads it when you switch
 | `unfiltered-nsfw-v2` | ~7 GB | yes | 50 | Uncensored SDXL fine-tune, custom license (see model card) |
 | `wai-nsfw-illustrious-v8` | 6.9 GB | yes | 50 | Uncensored anime SDXL (Illustrious), FAIPL-1.0-SD |
 | `fhdr-uncensored` | ~33.7 GB | no (offloads) | 40 | Uncensored FLUX.1-dev fine-tune. Gated, FLUX.1-dev non-commercial |
+| `lustify-v2` | ~7 GB | yes | 30 | Photorealistic uncensored SDXL, DPM++ 2M SDE Karras sampler. License not stated |
+| `epicrealism-xl-v8` | ~7 GB | yes | 50 | Photorealistic SDXL (unofficial re-upload). License not stated |
 
 Qwen models render at about 4 megapixels (2048×2048 for 1:1). The other presets render at about 1 megapixel (1024×1024 for 1:1). Check each model's license before any commercial use.
 

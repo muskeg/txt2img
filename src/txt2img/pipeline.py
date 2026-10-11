@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+import diffusers
 import torch
 from diffusers import DiffusionPipeline, PipelineQuantizationConfig
 from huggingface_hub.errors import GatedRepoError
@@ -159,6 +160,10 @@ class ImageGenerator:
             ) from e
 
         self.requested_placement = Placement(placement)
+        if self.preset.scheduler:
+            name, overrides = self.preset.scheduler
+            scheduler_cls = getattr(diffusers, name)
+            self.pipe.scheduler = scheduler_cls.from_config(self.pipe.scheduler.config, **overrides)
         self.placement = self._resolve_placement(self.requested_placement)
         if self.placement == Placement.GPU:
             self.pipe.to("cuda")

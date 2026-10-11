@@ -45,7 +45,15 @@ class ModelPreset:
     transparency: bool = False
     # Accepts reference images (`image=`), which animation frames are edited from.
     editing: bool = False
+    # (diffusers scheduler class, config overrides) replacing the repo's own scheduler.
+    scheduler: tuple[str, dict[str, object]] | None = None
 
+
+# The diffusers equivalent of the "DPM++ 2M SDE Karras" sampler.
+DPM_2M_SDE_KARRAS = (
+    "DPMSolverMultistepScheduler",
+    {"algorithm_type": "sde-dpmsolver++", "use_karras_sigmas": True},
+)
 
 # Recommended prompt format from the Qwen-Image-2.1 README.
 TRANSPARENT_TEMPLATE = (
@@ -179,6 +187,25 @@ MODELS: dict[str, ModelPreset] = {
         quantizable=("transformer", "text_encoder_2"),
         call_kwargs={"guidance_scale": 4.0, "max_sequence_length": 512},
         gated=True,
+    ),
+    "lustify-v2": ModelPreset(
+        "shootstuff/LUSTIFY-v2.0",
+        "Unspecified (see model card)",
+        MEGAPIXEL_RESOLUTIONS,
+        default_steps=30,
+        quantizable=("unet",),
+        call_kwargs={"guidance_scale": 5.5},
+        variant="fp16",
+        scheduler=DPM_2M_SDE_KARRAS,
+    ),
+    "epicrealism-xl-v8": ModelPreset(
+        "misri/epicrealismXL_v8Kiss",
+        "Unspecified (unofficial re-upload)",
+        MEGAPIXEL_RESOLUTIONS,
+        default_steps=50,
+        quantizable=("unet",),
+        call_kwargs={"guidance_scale": 5.0},
+        variant="fp16",
     ),
 }
 DEFAULT_MODEL = "z-image-turbo"

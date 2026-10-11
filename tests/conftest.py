@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
+from diffusers import EulerDiscreteScheduler
 from PIL import Image
 
 from txt2img import pipeline
@@ -42,5 +43,6 @@ def fake_pipe(monkeypatch: pytest.MonkeyPatch, fake_cuda: SimpleNamespace) -> Ma
         "tokenizer": object(),
     }
     pipe.side_effect = lambda **kwargs: SimpleNamespace(images=[Image.new("RGB", (8, 8))])
+    pipe.scheduler = EulerDiscreteScheduler()
     monkeypatch.setattr(pipeline.DiffusionPipeline, "from_pretrained", MagicMock(return_value=pipe))
     return pipe

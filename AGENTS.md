@@ -38,6 +38,7 @@ Update this file when a convention changes or a new pitfall turns up.
 ## Models
 - Presets in [config.py](src/txt2img/config.py): Z-Image (+Turbo, default), Qwen-Image-2.1 (+Turbo), FLUX.1-schnell, SD 3.5 Large/Large Turbo/Medium, SDXL, RealVisXL V5, plus uncensored community fine-tunes (3 SDXL, 1 FLUX.1-dev). Take steps, guidance and resolutions from each model card, or the pipeline defaults when the card has none; a new model needs a preset, nothing else.
 - `variant="fp16"` is fine when only some components ship fp16 files: diffusers loads the rest from the regular files.
+- A preset's `scheduler` swaps the repo's scheduler for a diffusers class with config overrides (e.g. `DPM_2M_SDE_KARRAS` for cards that recommend "DPM++ 2M SDE Karras"). Skip flow-matching SDXL fine-tunes (e.g. bigASP 2.5): the standard SDXL scheduler produces broken images with them.
 - Qwen-Image-2.1 and Z-Image need **diffusers from git** (`[tool.uv.sources]`; `uv.lock` pins the commit) and `transformers>=5.17`. Qwen's Qwen3-VL text encoder also needs `torchvision`, which comes from the same CUDA index as `torch`.
 - Qwen-Image-2.1-Turbo stores its sampling schedule in the checkpoint, so `num_inference_steps` does **not** change it (`default_steps=None`). Distilled models (Turbo, schnell) need guidance 0.
 - Qwen uses 2048-class resolutions; the others use ~1 MP buckets. Don't use arbitrary sizes.
