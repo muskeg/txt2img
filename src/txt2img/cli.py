@@ -17,6 +17,7 @@ from txt2img.config import (
     Placement,
     Quantization,
 )
+from txt2img.local import CHECKPOINTS, LORAS, parse_lora, resolve_local
 from txt2img.pipeline import GPUUnavailableError, ImageGenerator, ModelAccessError, save_image
 
 ModelChoice = StrEnum("ModelChoice", {name: name for name in MODELS})
@@ -24,7 +25,6 @@ EditModelChoice = StrEnum(
     "EditModelChoice", {name: name for name, p in MODELS.items() if p.editing}
 )
 AspectChoice = StrEnum("AspectChoice", {name: name for name in ASPECTS})
-_DEFAULT_MODEL = ModelChoice(DEFAULT_MODEL)
 _DEFAULT_EDIT_MODEL = EditModelChoice(DEFAULT_EDIT_MODEL)
 _DEFAULT_ASPECT = AspectChoice(DEFAULT_ASPECT)
 
@@ -76,17 +76,72 @@ def _check_model_options(model: str, steps: int | None, transparent: bool) -> No
         )
 
 
+def _check_advanced_options(
+    model: str,
+    negative_prompt: str | None,
+    cfg: float | None,
+    checkpoint: str | None,
+    quantize: Quantization,
+) -> None:
+    preset = MODELS[model]
+    if negative_prompt and not preset.supports_negative:
+        supported = ", ".join(n for n, p in MODELS.items() if p.supports_negative)
+        raise typer.BadParameter(
+            f"the {model} model doesn't take one (use {supported}).",
+            param_hint="--negative-prompt",
+        )
+    if cfg is not None and not preset.adjustable_guidance:
+        raise typer.BadParameter(f"the {model} model's guidance is fixed.", param_hint="--cfg")
+    if checkpoint and not preset.checkpoint_pipeline:
+        raise typer.BadParameter(
+            f"the {model} model isn't SDXL-based; use -m sdxl or a Pony/SDXL preset.",
+            param_hint="--checkpoint",
+        )
+    if (checkpoint or preset.single_file) and quantize != Quantization.NONE:
+        raise typer.BadParameter(
+            "4-bit quantization isn't supported with single-file checkpoints.",
+            param_hint="--quantize",
+        )
+
+
+def _resolve_files(
+    checkpoint: str | None, loras: list[str] | None, models_dir: Path | None
+) -> tuple[Path | None, list[tuple[Path, float]]]:
+    try:
+        checkpoint_path = resolve_local(checkpoint, CHECKPOINTS, models_dir) if checkpoint else None
+        lora_files = [
+            (resolve_local(name, LORAS, models_dir), scale)
+            for name, scale in map(parse_lora, loras or [])
+        ]
+    except (FileNotFoundError, ValueError) as e:
+        raise typer.BadParameter(str(e), param_hint="--checkpoint / --lora") from e
+    return checkpoint_path, lora_files
+
+
 def _load(
-    model: str, placement: Placement, quantize: Quantization, models_dir: Path | None
+    model: str,
+    placement: Placement,
+    quantize: Quantization,
+    models_dir: Path | None,
+    checkpoint: Path | None = None,
+    loras: list[tuple[Path, float]] | None = None,
 ) -> ImageGenerator:
     try:
         generator = ImageGenerator(
-            model, placement=placement, quantization=quantize, models_dir=models_dir
+            model,
+            placement=placement,
+            quantization=quantize,
+            models_dir=models_dir,
+            checkpoint=checkpoint,
+            loras=loras,
         )
     except (GPUUnavailableError, ModelAccessError) as e:
         typer.echo(f"Error: {e}", err=True)
         raise typer.Exit(1) from e
-    typer.echo(f"Loaded {model} ({generator.placement})", err=True)
+    extras = [f"checkpoint {checkpoint.name}"] if checkpoint else []
+    extras += [f"LoRA {path.stem} x{scale:g}" for path, scale in loras or []]
+    details = ", ".join([str(generator.placement), *extras])
+    typer.echo(f"Loaded {model} ({details})", err=True)
     typer.echo(generator.load_memory.summary(), err=True)
     return generator
 
@@ -95,12 +150,42 @@ def _load(
 def main(
     prompt: Annotated[str, typer.Argument(help="Text prompt describing the image.")],
     model: Annotated[
-        ModelChoice, typer.Option("--model", "-m", help="Model preset.")
-    ] = _DEFAULT_MODEL,
+        ModelChoice | None,
+        typer.Option(
+            "--model",
+            "-m",
+            help=f"Model preset. Default: {DEFAULT_MODEL}, or sdxl with --checkpoint.",
+        ),
+    ] = None,
     aspect: AspectOption = _DEFAULT_ASPECT,
     seed: SeedOption = None,
     steps: StepsOption = None,
     count: Annotated[int, typer.Option("--count", "-n", min=1, help="Number of images.")] = 1,
+    negative_prompt: Annotated[
+        str | None,
+        typer.Option(
+            "--negative-prompt",
+            "-N",
+            help='What to avoid. Defaults to the model\'s own; "" for none.',
+        ),
+    ] = None,
+    cfg: Annotated[
+        float | None,
+        typer.Option(min=0, help="Guidance (CFG) scale. Higher follows the prompt more closely."),
+    ] = None,
+    checkpoint: Annotated[
+        str | None,
+        typer.Option(
+            help="SDXL .safetensors checkpoint: a path, or a file name in <models-dir>/checkpoints."
+        ),
+    ] = None,
+    lora: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--lora",
+            help="LoRA as name[:strength] (default 1.0) from <models-dir>/loras. Repeatable.",
+        ),
+    ] = None,
     transparent: TransparentOption = False,
     output_dir: OutputDirOption = OUTPUT_DIR,
     placement: PlacementOption = Placement.AUTO,
@@ -108,8 +193,11 @@ def main(
     models_dir: ModelsDirOption = None,
 ) -> None:
     """Generate images from a text prompt."""
-    _check_model_options(model.value, steps, transparent)
-    generator = _load(model.value, placement, quantize, models_dir)
+    model_name = model.value if model else ("sdxl" if checkpoint else DEFAULT_MODEL)
+    _check_model_options(model_name, steps, transparent)
+    _check_advanced_options(model_name, negative_prompt, cfg, checkpoint, quantize)
+    checkpoint_path, lora_files = _resolve_files(checkpoint, lora, models_dir)
+    generator = _load(model_name, placement, quantize, models_dir, checkpoint_path, lora_files)
 
     generation = generator.generate(
         prompt,
@@ -118,6 +206,8 @@ def main(
         steps=steps,
         count=count,
         transparent=transparent,
+        negative_prompt=negative_prompt,
+        guidance=cfg,
     )
     for result in generation.images:
         path = save_image(result, output_dir)

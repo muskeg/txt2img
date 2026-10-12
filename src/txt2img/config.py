@@ -47,6 +47,19 @@ class ModelPreset:
     editing: bool = False
     # (diffusers scheduler class, config overrides) replacing the repo's own scheduler.
     scheduler: tuple[str, dict[str, object]] | None = None
+    # Takes a negative prompt (needs CFG); default_negative applies when none is given.
+    supports_negative: bool = False
+    default_negative: str = ""
+    # Prepended to every prompt, e.g. the quality tags Pony models are trained on.
+    prompt_prefix: str = ""
+    # Single weights file inside repo_id, loaded with from_single_file.
+    single_file: str | None = None
+    # Pipeline class for single-file weights: the preset's own or a local --checkpoint.
+    checkpoint_pipeline: str | None = None
+
+    @property
+    def adjustable_guidance(self) -> bool:
+        return float(self.call_kwargs.get("guidance_scale", 0)) > 0
 
 
 # The diffusers equivalent of the "DPM++ 2M SDE Karras" sampler.
@@ -54,6 +67,10 @@ DPM_2M_SDE_KARRAS = (
     "DPMSolverMultistepScheduler",
     {"algorithm_type": "sde-dpmsolver++", "use_karras_sigmas": True},
 )
+
+SDXL_PIPELINE = "StableDiffusionXLPipeline"
+PONY_PREFIX = "score_9, score_8_up, score_7_up"
+PONY_NEGATIVE = "score_6, score_5, score_4, worst quality, low quality"
 
 # Recommended prompt format from the Qwen-Image-2.1 README.
 TRANSPARENT_TEMPLATE = (
@@ -75,6 +92,7 @@ MODELS: dict[str, ModelPreset] = {
         "Tongyi-MAI/Z-Image",
         "Apache-2.0",
         MEGAPIXEL_RESOLUTIONS,
+        supports_negative=True,
         default_steps=50,
         quantizable=("transformer", "text_encoder"),
         call_kwargs={"guidance_scale": 4.0},
@@ -110,6 +128,7 @@ MODELS: dict[str, ModelPreset] = {
         "stabilityai/stable-diffusion-3.5-large",
         "Stability Community License",
         MEGAPIXEL_RESOLUTIONS,
+        supports_negative=True,
         default_steps=28,
         quantizable=("transformer", "text_encoder_3"),
         call_kwargs={"guidance_scale": 3.5},
@@ -128,6 +147,7 @@ MODELS: dict[str, ModelPreset] = {
         "stabilityai/stable-diffusion-3.5-medium",
         "Stability Community License",
         MEGAPIXEL_RESOLUTIONS,
+        supports_negative=True,
         default_steps=40,
         quantizable=("transformer", "text_encoder_3"),
         call_kwargs={"guidance_scale": 4.5},
@@ -137,6 +157,8 @@ MODELS: dict[str, ModelPreset] = {
         "stabilityai/stable-diffusion-xl-base-1.0",
         "CreativeML Open RAIL++-M",
         MEGAPIXEL_RESOLUTIONS,
+        supports_negative=True,
+        checkpoint_pipeline=SDXL_PIPELINE,
         default_steps=50,
         quantizable=("unet",),
         call_kwargs={"guidance_scale": 5.0},
@@ -146,6 +168,12 @@ MODELS: dict[str, ModelPreset] = {
         "SG161222/RealVisXL_V5.0",
         "CreativeML Open RAIL++-M",
         MEGAPIXEL_RESOLUTIONS,
+        supports_negative=True,
+        checkpoint_pipeline=SDXL_PIPELINE,
+        default_negative=(
+            "bad hands, bad anatomy, ugly, deformed, face asymmetry, eyes asymmetry, "
+            "deformed eyes, deformed mouth, open mouth"
+        ),
         default_steps=50,
         quantizable=("unet",),
         call_kwargs={"guidance_scale": 5.0},
@@ -156,6 +184,9 @@ MODELS: dict[str, ModelPreset] = {
         "Heartsync/NSFW-Uncensored",
         "MIT",
         MEGAPIXEL_RESOLUTIONS,
+        supports_negative=True,
+        checkpoint_pipeline=SDXL_PIPELINE,
+        default_negative="low quality, blurry, deformed",
         default_steps=30,
         quantizable=("unet",),
         call_kwargs={"guidance_scale": 7.5},
@@ -165,6 +196,8 @@ MODELS: dict[str, ModelPreset] = {
         "UnfilteredAI/NSFW-gen-v2",
         "Other (see model card)",
         MEGAPIXEL_RESOLUTIONS,
+        supports_negative=True,
+        checkpoint_pipeline=SDXL_PIPELINE,
         default_steps=50,
         quantizable=("unet",),
         call_kwargs={"guidance_scale": 5.0},
@@ -175,6 +208,8 @@ MODELS: dict[str, ModelPreset] = {
         "John6666/wai-nsfw-illustrious-v80-sdxl",
         "FAIPL-1.0-SD",
         MEGAPIXEL_RESOLUTIONS,
+        supports_negative=True,
+        checkpoint_pipeline=SDXL_PIPELINE,
         default_steps=50,
         quantizable=("unet",),
         call_kwargs={"guidance_scale": 5.0},
@@ -192,6 +227,8 @@ MODELS: dict[str, ModelPreset] = {
         "shootstuff/LUSTIFY-v2.0",
         "Unspecified (see model card)",
         MEGAPIXEL_RESOLUTIONS,
+        supports_negative=True,
+        checkpoint_pipeline=SDXL_PIPELINE,
         default_steps=30,
         quantizable=("unet",),
         call_kwargs={"guidance_scale": 5.5},
@@ -202,10 +239,43 @@ MODELS: dict[str, ModelPreset] = {
         "misri/epicrealismXL_v8Kiss",
         "Unspecified (unofficial re-upload)",
         MEGAPIXEL_RESOLUTIONS,
+        supports_negative=True,
+        checkpoint_pipeline=SDXL_PIPELINE,
         default_steps=50,
         quantizable=("unet",),
         call_kwargs={"guidance_scale": 5.0},
         variant="fp16",
+    ),
+    # Pony-based: trained on score tags, added by prompt_prefix. Pony-family default settings.
+    "pony-realism-v23": ModelPreset(
+        "John6666/pony-realism-v23-sdxl",
+        "FAIPL-1.0-SD",
+        MEGAPIXEL_RESOLUTIONS,
+        default_steps=30,
+        quantizable=("unet",),
+        call_kwargs={"guidance_scale": 6.0},
+        supports_negative=True,
+        default_negative=PONY_NEGATIVE,
+        prompt_prefix=PONY_PREFIX,
+        checkpoint_pipeline=SDXL_PIPELINE,
+    ),
+    "pornworks-pony-v04": ModelPreset(
+        "Manjushri/pornworks-real-porn-photo-realistic-nsfw-sdxl-and-pony-chekpoint",
+        "CreativeML Open RAIL++-M",
+        MEGAPIXEL_RESOLUTIONS,
+        default_steps=30,
+        quantizable=("unet",),
+        call_kwargs={"guidance_scale": 6.0},
+        supports_negative=True,
+        # From the model card, without A1111 weighting parentheses.
+        default_negative=(
+            "longbody, lowres, bad anatomy, bad hands, missing fingers, extra digit, fewer digits, "
+            "cropped, worst quality, low quality, score_6, score_5, score_4, anime, cartoon, "
+            "graphic, blur, blurry, bokeh, 3d, render, text, painting, deformed, mutated, ugly"
+        ),
+        prompt_prefix=PONY_PREFIX,
+        single_file="pornworksRealPornPhoto_ponyV04.safetensors",
+        checkpoint_pipeline=SDXL_PIPELINE,
     ),
 }
 DEFAULT_MODEL = "z-image-turbo"

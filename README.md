@@ -4,7 +4,8 @@ Generate images from text prompts with open-weight models, locally on an NVIDIA 
 
 ## Features
 
-- **16 model presets**: Z-Image and Z-Image-Turbo, Qwen-Image-2.1 and Qwen-Image-2.1-Turbo, FLUX.1-schnell, Stable Diffusion 3.5 (Large, Large Turbo, Medium), SDXL, RealVisXL V5, and six uncensored community fine-tunes (five SDXL, two of them photorealistic, and one FLUX.1-dev). Each preset uses the steps, guidance, sampler and resolutions from its model card.
+- **18 model presets**: Z-Image and Z-Image-Turbo, Qwen-Image-2.1 and Qwen-Image-2.1-Turbo, FLUX.1-schnell, Stable Diffusion 3.5 (Large, Large Turbo, Medium), SDXL, RealVisXL V5, and eight uncensored community fine-tunes (photorealistic and anime SDXL, two Pony-based, one FLUX.1-dev). Each preset uses the steps, guidance, sampler, negative prompt and resolutions from its model card.
+- **Your own checkpoints and LoRAs** (optional): load any SDXL or Pony `.safetensors` checkpoint (e.g. from Civitai) and stack LoRAs at chosen strengths, plus negative prompts and CFG control.
 - **Automatic VRAM placement**: the whole model goes on the GPU when it fits; otherwise components are offloaded to system RAM and moved to the GPU only while they run. Optional 4-bit (NF4) quantization shrinks big models for smaller GPUs.
 - **Memory report**: shows what share of the weights sits in VRAM vs RAM and the peak VRAM use, and warns when VRAM overflows into system RAM. On WSL that overflow is silent and roughly 70x slower.
 - **Transparent images**: native RGBA output with the Qwen-Image-2.1 models.
@@ -29,6 +30,7 @@ The exact versions are pinned in `uv.lock`.
 | `diffusers` | Model pipelines. Installed from git, because Qwen-Image-2.1 and Z-Image need unreleased code |
 | `transformers`, `accelerate` | Text encoders and CPU offload |
 | `bitsandbytes` | 4-bit NF4 quantization |
+| `peft` | Loading LoRAs |
 | `typer` | Command line |
 | `gradio` | Web UI |
 | `pillow` | Image I/O and animations |
@@ -84,11 +86,15 @@ uv run txt2img "a castle on a cliff" -m sdxl --steps 30 --quantize 4bit
 
 | Option | Default | Description |
 |---|---|---|
-| `-m, --model` | `z-image-turbo` | Model preset (see [Models](#models)) |
+| `-m, --model` | `z-image-turbo` (`sdxl` with `--checkpoint`) | Model preset (see [Models](#models)) |
 | `-a, --aspect` | `1:1` | `1:1`, `4:3`, `3:4`, `3:2`, `2:3`, `16:9`, `9:16` |
 | `--seed` | random | Image `i` uses `seed + i` |
 | `--steps` | model's | Denoising steps (Qwen-Image-2.1-Turbo has a fixed schedule) |
 | `-n, --count` | 1 | Number of images |
+| `-N, --negative-prompt` | model's | What to avoid. `""` for none |
+| `--cfg` | model's | Guidance (CFG) scale. Higher follows the prompt more closely |
+| `--checkpoint` | | SDXL/Pony `.safetensors` file: a path, or a name in `<models-dir>/checkpoints` |
+| `--lora` | | `name[:strength]` from `<models-dir>/loras` (or a path). Repeatable |
 | `--transparent` | off | Transparent background (Qwen-Image-2.1 models only) |
 | `--placement` | `auto` | `auto`, `gpu` or `offload` |
 | `--quantize` | `none` | `none` or `4bit` |
@@ -108,6 +114,26 @@ VRAM: 13.0 GiB of 31.8 GiB (41%), including 1.6 GiB used by other apps
 ```
 
 If the peak goes over the limit, the report adds a `WARNING: VRAM limit exceeded` line. Switch to `--quantize 4bit` or `--placement offload` when that happens.
+
+### Negative prompt, CFG, checkpoints and LoRAs
+
+All optional. Distilled models (Turbo, schnell, Qwen) have fixed guidance and no negative prompt, and the CLI says so before loading anything.
+
+```bash
+# Steer away from things, and follow the prompt more strictly
+uv run txt2img "a portrait photo, natural light" -m lustify-v2 -N "blurry, cartoon, watermark" --cfg 7
+
+# Any SDXL/Pony checkpoint dropped in ~/models/checkpoints (sdxl settings by default)
+uv run txt2img "a portrait photo" --checkpoint myModel_v10
+
+# Same checkpoint with Pony prompt handling (adds the score tags and Pony negative prompt)
+uv run txt2img "a portrait photo" -m pony-realism-v23 --checkpoint myPonyModel_v10
+
+# LoRAs from ~/models/loras, each with its own strength
+uv run txt2img "a portrait photo" -m lustify-v2 --lora detail_tweaker:0.6 --lora my_style:0.9
+```
+
+Put files in `<models-dir>/checkpoints` and `<models-dir>/loras` (`~/models/checkpoints` and `~/models/loras` with the example config). Only `.safetensors` files are accepted: `.ckpt`, `.pt` and `.bin` files can run arbitrary code when loaded. Pony-based models are trained on `score_9, score_8_up, …` tags, which the Pony presets add for you; add `rating_explicit` and similar tags to your prompt yourself. Each PNG records the negative prompt, CFG, checkpoint and LoRAs used.
 
 ### Transparent images
 
@@ -155,7 +181,7 @@ uv run txt2img-ui
 
 Then open http://127.0.0.1:7860. The UI listens on localhost only. On WSL, the Windows browser can reach it at the same address. It has two tabs:
 
-- **Generate**: everything `txt2img` does, with the memory report under the results.
+- **Generate**: everything `txt2img` does, with the memory report under the results. The **Advanced** section has the negative prompt (prefilled with the model's), CFG, a checkpoint dropdown and a LoRA multi-select with a strength slider. Click **Rescan** after adding files.
 - **Animate**: upload a base image or generate one, paint the area to animate with the white brush, enter frame prompts or a motion prompt, then click **Animate**.
 
 The UI keeps one model loaded between generations. It unloads it when you switch models or change placement or quantization.
@@ -180,6 +206,8 @@ The UI keeps one model loaded between generations. It unloads it when you switch
 | `fhdr-uncensored` | ~33.7 GB | no (offloads) | 40 | Uncensored FLUX.1-dev fine-tune. Gated, FLUX.1-dev non-commercial |
 | `lustify-v2` | ~7 GB | yes | 30 | Photorealistic uncensored SDXL, DPM++ 2M SDE Karras sampler. License not stated |
 | `epicrealism-xl-v8` | ~7 GB | yes | 50 | Photorealistic SDXL (unofficial re-upload). License not stated |
+| `pony-realism-v23` | ~7 GB | yes | 30 | Photorealistic Pony SDXL, adds score tags. FAIPL-1.0-SD |
+| `pornworks-pony-v04` | ~7 GB | yes | 30 | Photorealistic explicit Pony SDXL (single file), adds score tags. CreativeML Open RAIL++-M |
 
 Qwen models render at about 4 megapixels (2048×2048 for 1:1). The other presets render at about 1 megapixel (1024×1024 for 1:1). Check each model's license before any commercial use.
 

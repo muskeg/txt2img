@@ -84,6 +84,11 @@ class GeneratedImage:
     steps: int | None
     quantization: Quantization = Quantization.NONE
     transparent: bool = False
+    negative_prompt: str = ""
+    guidance: float | None = None
+    # Local checkpoint file name and "name:strength" LoRAs, when used.
+    checkpoint: str | None = None
+    loras: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -133,7 +138,11 @@ class ImageGenerator:
         placement: Placement = Placement.AUTO,
         quantization: Quantization = Quantization.NONE,
         models_dir: Path | None = None,
+        checkpoint: Path | None = None,
+        loras: list[tuple[Path, float]] | None = None,
     ) -> None:
+        """`checkpoint` replaces the preset's weights with a local single-file model;
+        `loras` are (file, strength) pairs applied on top."""
         if model not in MODELS:
             raise ValueError(f"Unknown model {model!r}, expected one of {sorted(MODELS)}")
         if not torch.cuda.is_available():
@@ -143,16 +152,16 @@ class ImageGenerator:
         self.model = model
         self.preset = MODELS[model]
         self.quantization = Quantization(quantization)
+        if (checkpoint or self.preset.single_file) and not self.preset.checkpoint_pipeline:
+            raise ValueError(f"The {model} model can't load checkpoints; use an SDXL-based model.")
+        if (checkpoint or self.preset.single_file) and self.quantization != Quantization.NONE:
+            raise ValueError("4-bit quantization isn't supported with single-file checkpoints.")
+        self.checkpoint = checkpoint
+        self.loras = list(loras or [])
         free, self._vram_total = torch.cuda.mem_get_info()
         self._vram_other = max(0, self._vram_total - free - torch.cuda.memory_reserved())
         try:
-            self.pipe = DiffusionPipeline.from_pretrained(
-                self.preset.repo_id,
-                dtype=torch.bfloat16,
-                cache_dir=models_dir,
-                variant=self.preset.variant,
-                quantization_config=_quantization_config(self.preset, self.quantization),
-            )
+            self.pipe = self._load(models_dir)
         except GatedRepoError as e:
             raise ModelAccessError(
                 f"{self.preset.repo_id} is gated. Accept its license at "
@@ -164,12 +173,41 @@ class ImageGenerator:
             name, overrides = self.preset.scheduler
             scheduler_cls = getattr(diffusers, name)
             self.pipe.scheduler = scheduler_cls.from_config(self.pipe.scheduler.config, **overrides)
+        if self.loras:
+            names = [f"lora_{i}" for i in range(len(self.loras))]
+            for name, (path, _) in zip(names, self.loras, strict=True):
+                self.pipe.load_lora_weights(
+                    str(path.parent), weight_name=path.name, adapter_name=name
+                )
+            self.pipe.set_adapters(names, adapter_weights=[scale for _, scale in self.loras])
         self.placement = self._resolve_placement(self.requested_placement)
         if self.placement == Placement.GPU:
             self.pipe.to("cuda")
         else:
             self.pipe.enable_model_cpu_offload()
         self.load_memory = self._memory_report(torch.cuda.memory_reserved())
+
+    def _load(self, models_dir: Path | None) -> DiffusionPipeline:
+        if self.checkpoint or self.preset.single_file:
+            pipeline_cls = getattr(diffusers, self.preset.checkpoint_pipeline)
+            source = (
+                str(self.checkpoint)
+                if self.checkpoint
+                else (
+                    f"https://huggingface.co/{self.preset.repo_id}/blob/main/{self.preset.single_file}"
+                )
+            )
+            # from_single_file still takes the older torch_dtype argument.
+            return pipeline_cls.from_single_file(
+                source, torch_dtype=torch.bfloat16, cache_dir=models_dir
+            )
+        return DiffusionPipeline.from_pretrained(
+            self.preset.repo_id,
+            dtype=torch.bfloat16,
+            cache_dir=models_dir,
+            variant=self.preset.variant,
+            quantization_config=_quantization_config(self.preset, self.quantization),
+        )
 
     def _resolve_placement(self, placement: Placement) -> Placement:
         if placement != Placement.AUTO:
@@ -193,10 +231,13 @@ class ImageGenerator:
         count: int = 1,
         transparent: bool = False,
         images: list[Image.Image] | None = None,
+        negative_prompt: str | None = None,
+        guidance: float | None = None,
     ) -> Generation:
         """Generate `count` images; image i uses seed + i so each one can be reproduced alone.
 
         `images` are reference images the model edits from (editing models only).
+        `negative_prompt=None` uses the preset's default; "" uses none.
         """
         resolutions = self.preset.resolutions
         if aspect not in resolutions:
@@ -207,6 +248,10 @@ class ImageGenerator:
             raise ValueError(f"The {self.model} model can't generate transparent images.")
         if images and not self.preset.editing:
             raise ValueError(f"The {self.model} model doesn't accept reference images.")
+        if negative_prompt and not self.preset.supports_negative:
+            raise ValueError(f"The {self.model} model doesn't take a negative prompt.")
+        if guidance is not None and not self.preset.adjustable_guidance:
+            raise ValueError(f"The {self.model} model's guidance is fixed.")
         if steps is not None:
             if self.preset.default_steps is None:
                 raise ValueError(
@@ -223,11 +268,15 @@ class ImageGenerator:
             call_kwargs["num_inference_steps"] = steps
         if images:
             call_kwargs["image"] = images
-        model_prompt = (
-            TRANSPARENT_TEMPLATE.format(prompt=prompt.strip().rstrip("."))
-            if transparent
-            else prompt
-        )
+        if guidance is not None:
+            call_kwargs["guidance_scale"] = guidance
+        negative = self.preset.default_negative if negative_prompt is None else negative_prompt
+        if negative and self.preset.supports_negative:
+            call_kwargs["negative_prompt"] = negative
+        prefix = self.preset.prompt_prefix
+        model_prompt = f"{prefix}, {prompt}" if prefix else prompt
+        if transparent:
+            model_prompt = TRANSPARENT_TEMPLATE.format(prompt=model_prompt.strip().rstrip("."))
 
         torch.cuda.reset_peak_memory_stats()
         images_out = []
@@ -249,6 +298,10 @@ class ImageGenerator:
                     steps=steps,
                     quantization=self.quantization,
                     transparent=transparent,
+                    negative_prompt=call_kwargs.get("negative_prompt", ""),
+                    guidance=call_kwargs.get("guidance_scale"),
+                    checkpoint=self.checkpoint.name if self.checkpoint else None,
+                    loras=tuple(f"{path.stem}:{scale:g}" for path, scale in self.loras),
                 )
             )
         return Generation(images_out, self._memory_report(torch.cuda.max_memory_reserved()))
@@ -269,5 +322,13 @@ def save_image(result: GeneratedImage, output_dir: Path, name: str | None = None
         info.add_text("quantization", result.quantization.value)
     if result.transparent:
         info.add_text("transparent", "true")
+    if result.negative_prompt:
+        info.add_text("negative_prompt", result.negative_prompt)
+    if result.guidance is not None:
+        info.add_text("guidance", f"{result.guidance:g}")
+    if result.checkpoint:
+        info.add_text("checkpoint", result.checkpoint)
+    if result.loras:
+        info.add_text("loras", ", ".join(result.loras))
     result.image.save(path, pnginfo=info)
     return path

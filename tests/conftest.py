@@ -45,4 +45,9 @@ def fake_pipe(monkeypatch: pytest.MonkeyPatch, fake_cuda: SimpleNamespace) -> Ma
     pipe.side_effect = lambda **kwargs: SimpleNamespace(images=[Image.new("RGB", (8, 8))])
     pipe.scheduler = EulerDiscreteScheduler()
     monkeypatch.setattr(pipeline.DiffusionPipeline, "from_pretrained", MagicMock(return_value=pipe))
+    monkeypatch.setattr(
+        pipeline.diffusers.StableDiffusionXLPipeline,
+        "from_single_file",
+        MagicMock(return_value=pipe),
+    )
     return pipe

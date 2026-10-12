@@ -17,6 +17,7 @@ from txt2img.config import (
     Quantization,
     default_models_dir,
 )
+from txt2img.local import CHECKPOINTS, LORAS, list_local, resolve_local
 from txt2img.pipeline import (
     GPUUnavailableError,
     ImageGenerator,
@@ -26,36 +27,45 @@ from txt2img.pipeline import (
 )
 
 _generator: ImageGenerator | None = None
+_generator_key: tuple | None = None
+PRESET_WEIGHTS = "(model's own weights)"
 
 
-def _get_generator(model: str, placement: str, quantization: str) -> ImageGenerator:
-    global _generator
-    wanted = (model, placement, quantization)
-    current = _generator and (
-        _generator.model,
-        _generator.requested_placement,
-        _generator.quantization,
-    )
-    if current != wanted:
+def _get_generator(
+    model: str,
+    placement: str,
+    quantization: str,
+    checkpoint: str | None = None,
+    loras: tuple[tuple[str, float], ...] = (),
+) -> ImageGenerator:
+    global _generator, _generator_key
+    wanted = (model, placement, quantization, checkpoint, loras)
+    if _generator is None or _generator_key != wanted:
         # Only one model fits in RAM at a time; free the old one before loading another.
-        _generator = None
+        _generator = _generator_key = None
         gc.collect()
         torch.cuda.empty_cache()
+        models_dir = default_models_dir()
         try:
             _generator = ImageGenerator(
                 model,
                 placement=Placement(placement),
                 quantization=Quantization(quantization),
-                models_dir=default_models_dir(),
+                models_dir=models_dir,
+                checkpoint=resolve_local(checkpoint, CHECKPOINTS, models_dir)
+                if checkpoint
+                else None,
+                loras=[(resolve_local(name, LORAS, models_dir), scale) for name, scale in loras],
             )
-        except (GPUUnavailableError, ModelAccessError) as e:
+        except (GPUUnavailableError, ModelAccessError, FileNotFoundError, ValueError) as e:
             raise gr.Error(str(e)) from e
+        _generator_key = wanted
     return _generator
 
 
 def _memory_markdown(generator: ImageGenerator, peak: MemoryReport) -> str:
     sections = [
-        (f"Loaded {generator.model} ({generator.placement})", generator.load_memory),
+        (f"Loaded {generator.model} ({_load_details(generator)})", generator.load_memory),
         ("Peak during generation", peak),
     ]
     blocks = []
@@ -65,6 +75,14 @@ def _memory_markdown(generator: ImageGenerator, peak: MemoryReport) -> str:
             "  \n".join(f"**{line}**" if line.startswith("WARNING") else line for line in lines)
         )
     return "\n\n".join(blocks)
+
+
+def _load_details(generator: ImageGenerator) -> str:
+    details = [str(generator.placement)]
+    if generator.checkpoint:
+        details.append(f"checkpoint {generator.checkpoint.name}")
+    details += [f"LoRA {path.stem} x{scale:g}" for path, scale in generator.loras]
+    return ", ".join(details)
 
 
 def _seed(value: float | None) -> int | None:
@@ -90,11 +108,21 @@ def generate_images(
     transparent: bool,
     placement: str,
     quantization: str,
+    negative: str = "",
+    cfg: float | None = None,
+    checkpoint: str | None = None,
+    loras: list[str] | None = None,
+    lora_scale: float = 1.0,
 ) -> tuple[list[tuple[Image.Image, str]], str]:
     if not prompt.strip():
         raise gr.Error("Enter a prompt.")
     _check_transparent(model, transparent)
-    generator = _get_generator(model, placement, quantization)
+    preset = MODELS[model]
+    checkpoint = None if not checkpoint or checkpoint == PRESET_WEIGHTS else checkpoint
+    if checkpoint and not preset.checkpoint_pipeline:
+        raise gr.Error(f"{model} isn't SDXL-based; pick sdxl or a Pony/SDXL model for checkpoints.")
+    lora_specs = tuple((name, float(lora_scale)) for name in loras or [])
+    generator = _get_generator(model, placement, quantization, checkpoint, lora_specs)
     generation = generator.generate(
         prompt,
         aspect=aspect,
@@ -102,6 +130,8 @@ def generate_images(
         steps=_steps(model, steps),
         count=int(count),
         transparent=transparent,
+        negative_prompt=negative if preset.supports_negative else None,
+        guidance=float(cfg) if preset.adjustable_guidance and cfg is not None else None,
     )
     for r in generation.images:
         save_image(r, OUTPUT_DIR)
@@ -198,6 +228,30 @@ def _model_controls(model: str) -> tuple[gr.Slider, gr.Checkbox]:
     return steps, transparent
 
 
+def _guidance_controls(model: str) -> tuple[gr.Textbox, gr.Slider]:
+    preset = MODELS[model]
+    negative = gr.Textbox(
+        value=preset.default_negative,
+        interactive=preset.supports_negative,
+        label="Negative prompt" if preset.supports_negative else "Negative prompt (not supported)",
+    )
+    adjustable = preset.adjustable_guidance
+    cfg = gr.Slider(
+        value=float(preset.call_kwargs.get("guidance_scale", 0)),
+        interactive=adjustable,
+        label="CFG / guidance" if adjustable else "CFG / guidance (fixed by this model)",
+    )
+    return negative, cfg
+
+
+def _local_choices() -> tuple[gr.Dropdown, gr.Dropdown]:
+    models_dir = default_models_dir()
+    return (
+        gr.Dropdown(choices=[PRESET_WEIGHTS, *list_local(CHECKPOINTS, models_dir)]),
+        gr.Dropdown(choices=list_local(LORAS, models_dir)),
+    )
+
+
 def build_ui() -> gr.Blocks:
     model_choices = [(f"{name} (gated)" if p.gated else name, name) for name, p in MODELS.items()]
     edit_models = [name for name, p in MODELS.items() if p.editing]
@@ -226,6 +280,24 @@ def build_ui() -> gr.Blocks:
                 steps = gr.Slider(1, 100, step=1)
                 count = gr.Slider(1, 4, value=1, step=1, label="Images")
                 transparent = gr.Checkbox()
+            with gr.Accordion("Advanced: negative prompt, CFG, checkpoint, LoRAs", open=False):
+                negative = gr.Textbox(lines=2)
+                cfg = gr.Slider(0, 15, step=0.5)
+                with gr.Row():
+                    checkpoint = gr.Dropdown(
+                        [PRESET_WEIGHTS],
+                        value=PRESET_WEIGHTS,
+                        allow_custom_value=True,
+                        label="Checkpoint (SDXL models only, from <models>/checkpoints)",
+                    )
+                    loras = gr.Dropdown(
+                        [],
+                        multiselect=True,
+                        allow_custom_value=True,
+                        label="LoRAs (from <models>/loras)",
+                    )
+                    lora_scale = gr.Slider(0, 2, value=1.0, step=0.05, label="LoRA strength")
+                rescan = gr.Button("Rescan checkpoint and LoRA folders", size="sm")
             button = gr.Button("Generate", variant="primary")
             gallery = gr.Gallery(label="Results", columns=2)
             memory = gr.Markdown()
@@ -277,9 +349,14 @@ def build_ui() -> gr.Blocks:
         for m, s, t in [(model, steps, transparent), (a_model, a_steps, a_transparent)]:
             demo.load(_model_controls, m, [s, t])
             m.change(_model_controls, m, [s, t])
+        demo.load(_guidance_controls, model, [negative, cfg])
+        model.change(_guidance_controls, model, [negative, cfg])
+        demo.load(_local_choices, None, [checkpoint, loras])
+        rescan.click(_local_choices, None, [checkpoint, loras])
         button.click(
             generate_images,
-            [prompt, model, aspect, seed, steps, count, transparent, placement, quantization],
+            [prompt, model, aspect, seed, steps, count, transparent, placement, quantization]
+            + [negative, cfg, checkpoint, loras, lora_scale],
             [gallery, memory],
         )
         base_button.click(
