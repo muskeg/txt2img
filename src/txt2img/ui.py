@@ -1,4 +1,6 @@
 import gc
+import os
+import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -468,3 +470,8 @@ def build_ui() -> gr.Blocks:
 def main() -> None:
     # Localhost only; WSL forwards it to the Windows browser.
     build_ui().launch(server_name="127.0.0.1", allowed_paths=[str(Path(OUTPUT_DIR).resolve())])
+    # Ctrl+C: Python's teardown of a loaded model takes from seconds to minutes, and waits
+    # for a running generation; nothing is left to save, so skip it.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)

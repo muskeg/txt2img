@@ -58,6 +58,7 @@ Update this file when a convention changes or a new pitfall turns up.
 - **WSL never raises CUDA OOM:** past the limit the driver silently spills VRAM into system RAM at ~3 GB/s (vs ~200 GB/s). `MemoryReport` detects it from `max_memory_reserved() + other apps > total` and warns. Keep that check when changing memory code.
 - [`__init__.py`](src/txt2img/__init__.py) sets `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` before torch loads. Without it, offloaded Qwen fragmented to 33.4 GiB reserved for 26.9 GiB used and spilled. With it: 30.2 GiB, no spill.
 - WSL has 45 GB of RAM, enough for one large model at a time, so the UI unloads the old model before loading another.
+- The UI ends with `os._exit(0)` once Gradio closes on Ctrl+C: with a model loaded, Python's teardown read from disk for 4 s to over a minute, and it waits for any running generation. To test shutdown from a script, note that background jobs in non-interactive bash ignore SIGINT.
 
 ## Environment pitfalls
 - **GPU is an RTX 5090 (Blackwell, sm_120, 32 GB).** It needs PyTorch wheels built for CUDA 12.8+. torch is pinned to the `https://download.pytorch.org/whl/cu132` index (`[[tool.uv.index]]` + `[tool.uv.sources]` in `pyproject.toml`). Don't switch to `cu126`, which has no sm_120 support. The cu128 index stopped at torch 2.11. Before you change the index, check that the driver supports the CUDA version (`nvidia-smi`, currently up to 13.4). If you see `no kernel image is available`, torch was built for the wrong CUDA version.
