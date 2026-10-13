@@ -162,7 +162,7 @@ def test_animate_reports_the_highest_peak(
 
 
 def test_animate_requires_an_editing_model(fake_pipe: MagicMock) -> None:
-    with pytest.raises(ValueError, match="reference images"):
+    with pytest.raises(ValueError, match="edit instructions"):
         animate(ImageGenerator("sdxl"), Image.new("RGB", (64, 64)), ["a"])
 
 

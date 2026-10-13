@@ -1,13 +1,19 @@
-import math
 import secrets
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 
-from PIL import Image, ImageFilter, ImageOps
+from PIL import Image, ImageOps
 
-from txt2img.pipeline import GeneratedImage, ImageGenerator, MemoryReport, save_image
+from txt2img.pipeline import (
+    GeneratedImage,
+    ImageGenerator,
+    MemoryReport,
+    closest_aspect,
+    composite,
+    save_image,
+)
 
 
 class FrameSource(StrEnum):
@@ -55,29 +61,11 @@ def fit_to_preset(
     image: Image.Image, resolutions: dict[str, tuple[int, int]]
 ) -> tuple[str, Image.Image]:
     """Center-crop and resize to the preset resolution with the closest aspect ratio."""
-    ratio = image.width / image.height
-    aspect = min(
-        resolutions, key=lambda a: abs(math.log(resolutions[a][0] / resolutions[a][1] / ratio))
-    )
+    aspect = closest_aspect(image.size, resolutions)
     size = resolutions[aspect]
     if image.size != size:
         image = ImageOps.fit(image, size, Image.Resampling.LANCZOS)
     return aspect, image
-
-
-def composite(
-    base: Image.Image, frame: Image.Image, mask: Image.Image | None, feather: int
-) -> Image.Image:
-    """Keep `base` outside the mask (white = animated), blending over `feather` pixels."""
-    frame = frame.convert("RGBA")
-    if frame.size != base.size:
-        frame = frame.resize(base.size, Image.Resampling.LANCZOS)
-    if mask is None:
-        return frame
-    soft = mask.convert("L").resize(base.size)
-    if feather:
-        soft = soft.filter(ImageFilter.GaussianBlur(feather))
-    return Image.composite(frame, base.convert("RGBA"), soft)
 
 
 def animate(
@@ -95,6 +83,8 @@ def animate(
     """Edit `base` once per prompt; frame k uses seed + k."""
     if not prompts:
         raise ValueError("at least one frame prompt is required")
+    if not generator.preset.editing:
+        raise ValueError(f"The {generator.model} model can't follow edit instructions.")
     aspect, base = fit_to_preset(base.convert("RGBA"), generator.preset.resolutions)
     if mask is not None:
         mask = ImageOps.fit(mask.convert("L"), base.size, Image.Resampling.LANCZOS)

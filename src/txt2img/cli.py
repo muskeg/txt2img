@@ -1,9 +1,10 @@
+from dataclasses import replace
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
 
 import typer
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 
 from txt2img.animate import AnimationFormat, FrameSource, animate, frame_prompts, save_animation
 from txt2img.config import (
@@ -11,6 +12,9 @@ from txt2img.config import (
     DEFAULT_ASPECT,
     DEFAULT_EDIT_MODEL,
     DEFAULT_MODEL,
+    DEFAULT_STRENGTH,
+    FOLLOW_ASPECTS,
+    MAX_REFERENCES,
     MODELS,
     MODELS_DIR_ENV,
     OUTPUT_DIR,
@@ -18,13 +22,20 @@ from txt2img.config import (
     Quantization,
 )
 from txt2img.local import CHECKPOINTS, LORAS, parse_lora, resolve_local
-from txt2img.pipeline import GPUUnavailableError, ImageGenerator, ModelAccessError, save_image
+from txt2img.pipeline import (
+    GPUUnavailableError,
+    ImageGenerator,
+    ModelAccessError,
+    load_image,
+    save_image,
+)
 
 ModelChoice = StrEnum("ModelChoice", {name: name for name in MODELS})
 EditModelChoice = StrEnum(
     "EditModelChoice", {name: name for name, p in MODELS.items() if p.editing}
 )
 AspectChoice = StrEnum("AspectChoice", {name: name for name in ASPECTS})
+InputAspectChoice = StrEnum("InputAspectChoice", {n: n for n in ASPECTS + FOLLOW_ASPECTS})
 _DEFAULT_EDIT_MODEL = EditModelChoice(DEFAULT_EDIT_MODEL)
 _DEFAULT_ASPECT = AspectChoice(DEFAULT_ASPECT)
 
@@ -104,6 +115,42 @@ def _check_advanced_options(
         )
 
 
+def _load_inputs(
+    model: str,
+    paths: list[Path],
+    mask: Path | None,
+    strength: float | None,
+    aspect: str | None,
+) -> tuple[list[Image.Image], Image.Image | None]:
+    """Check the input-image options against the model, then open the files."""
+    editing = MODELS[model].editing
+    if (mask or strength is not None) and not paths:
+        raise typer.BadParameter("needs an --image.", param_hint="--mask / --strength")
+    if strength is not None and editing:
+        raise typer.BadParameter(
+            f"the {model} model follows edit instructions; describe the change in the prompt.",
+            param_hint="--strength",
+        )
+    if len(paths) > MAX_REFERENCES:
+        raise typer.BadParameter(f"at most {MAX_REFERENCES} images.", param_hint="--image")
+    if len(paths) > 1 and not editing:
+        supported = ", ".join(n for n, p in MODELS.items() if p.editing)
+        raise typer.BadParameter(
+            f"the {model} model takes one image; use {supported} to combine several.",
+            param_hint="--image",
+        )
+    if aspect in FOLLOW_ASPECTS and FOLLOW_ASPECTS.index(aspect) >= len(paths):
+        raise typer.BadParameter(f"there is no {aspect}.", param_hint="--aspect")
+    try:
+        images = [load_image(path) for path in paths]
+        mask_image = load_image(mask) if mask else None
+    except UnidentifiedImageError as e:
+        raise typer.BadParameter(str(e), param_hint="--image / --mask") from e
+    if mask_image is not None and mask_image.convert("L").getbbox() is None:
+        raise typer.BadParameter("it has no white area to edit.", param_hint="--mask")
+    return images, mask_image
+
+
 def _resolve_files(
     checkpoint: str | None, loras: list[str] | None, models_dir: Path | None
 ) -> tuple[Path | None, list[tuple[Path, float]]]:
@@ -148,16 +195,56 @@ def _load(
 
 @app.command()
 def main(
-    prompt: Annotated[str, typer.Argument(help="Text prompt describing the image.")],
+    prompt: Annotated[
+        str, typer.Argument(help="Text prompt describing the image, or the edit with --image.")
+    ],
     model: Annotated[
         ModelChoice | None,
         typer.Option(
             "--model",
             "-m",
-            help=f"Model preset. Default: {DEFAULT_MODEL}, or sdxl with --checkpoint.",
+            help=f"Model preset. Default: {DEFAULT_MODEL}, {DEFAULT_EDIT_MODEL} with --image, "
+            "or sdxl with --checkpoint.",
         ),
     ] = None,
-    aspect: AspectOption = _DEFAULT_ASPECT,
+    image: Annotated[
+        list[Path] | None,
+        typer.Option(
+            "--image",
+            "-i",
+            exists=True,
+            dir_okay=False,
+            help="Input image. Qwen-Image-2.1 models follow the prompt as an edit instruction "
+            f"and take up to {MAX_REFERENCES} (call them <image1>, <image2>... in the prompt); "
+            "other models redraw one image by --strength.",
+        ),
+    ] = None,
+    mask: Annotated[
+        Path | None,
+        typer.Option(
+            exists=True,
+            dir_okay=False,
+            help="Black-and-white image: only the white area of the first --image changes.",
+        ),
+    ] = None,
+    strength: Annotated[
+        float | None,
+        typer.Option(
+            min=0.01,
+            max=1,
+            help=f"How much to redraw the --image (models without edit instructions). "
+            f"Default: {DEFAULT_STRENGTH}.",
+        ),
+    ] = None,
+    aspect: Annotated[
+        InputAspectChoice | None,
+        typer.Option(
+            "--aspect",
+            "-a",
+            help="Aspect ratio, or imageN to follow input image N. "
+            "Default: image1 with --image, else 1:1.",
+        ),
+    ] = None,
     seed: SeedOption = None,
     steps: StepsOption = None,
     count: Annotated[int, typer.Option("--count", "-n", min=1, help="Number of images.")] = 1,
@@ -192,24 +279,36 @@ def main(
     quantize: QuantizeOption = Quantization.NONE,
     models_dir: ModelsDirOption = None,
 ) -> None:
-    """Generate images from a text prompt."""
-    model_name = model.value if model else ("sdxl" if checkpoint else DEFAULT_MODEL)
+    """Generate images from a text prompt, optionally starting from input images."""
+    if model:
+        model_name = model.value
+    elif checkpoint:
+        model_name = "sdxl"
+    else:
+        model_name = DEFAULT_EDIT_MODEL if image else DEFAULT_MODEL
     _check_model_options(model_name, steps, transparent)
     _check_advanced_options(model_name, negative_prompt, cfg, checkpoint, quantize)
+    aspect_name = aspect.value if aspect else None
+    images, mask_image = _load_inputs(model_name, image or [], mask, strength, aspect_name)
     checkpoint_path, lora_files = _resolve_files(checkpoint, lora, models_dir)
     generator = _load(model_name, placement, quantize, models_dir, checkpoint_path, lora_files)
 
     generation = generator.generate(
         prompt,
-        aspect=aspect.value,
+        aspect=aspect_name,
         seed=seed,
         steps=steps,
         count=count,
         transparent=transparent,
+        images=images,
+        mask=mask_image,
+        strength=strength,
         negative_prompt=negative_prompt,
         guidance=cfg,
     )
+    names = tuple(path.name for path in image or [])
     for result in generation.images:
+        result = replace(result, references=names, mask=mask.name if mask else None)
         path = save_image(result, output_dir)
         typer.echo(f"{path} (seed {result.seed})")
     typer.echo(f"Peak during generation:\n{generation.memory.summary()}", err=True)

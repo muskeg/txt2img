@@ -50,4 +50,14 @@ def fake_pipe(monkeypatch: pytest.MonkeyPatch, fake_cuda: SimpleNamespace) -> Ma
         "from_single_file",
         MagicMock(return_value=pipe),
     )
+    # Img2img and inpainting pipelines built from the loaded one: pipe.img2img, pipe.inpaint.
+    for attr, auto_cls in [
+        ("img2img", pipeline.AutoPipelineForImage2Image),
+        ("inpaint", pipeline.AutoPipelineForInpainting),
+    ]:
+        derived = MagicMock(
+            side_effect=lambda **kwargs: SimpleNamespace(images=[Image.new("RGB", (8, 8))])
+        )
+        setattr(pipe, attr, derived)
+        monkeypatch.setattr(auto_cls, "from_pipe", MagicMock(return_value=derived))
     return pipe

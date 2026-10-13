@@ -14,9 +14,9 @@ Update this file when a convention changes or a new pitfall turns up.
 
 ## Commands
 - `uv sync`: install dependencies
-- `uv run txt2img "a prompt"`: generate an image (`--help` lists the options)
+- `uv run txt2img "a prompt"`: generate an image (`--help` lists the options); add `-i photo.png` (repeatable) to edit or combine input images, `--mask` to limit the change to an area
 - `uv run txt2img-animate --base-prompt "..." -f "frame 1" -f "frame 2"`: masked animation (`--help` lists the options)
-- `uv run txt2img-ui`: web UI at http://127.0.0.1:7860 (Generate and Animate tabs)
+- `uv run txt2img-ui`: web UI at http://127.0.0.1:7860 (Generate tab with input images, Animate tab)
 - `uv run pytest`: run the mocked tests. `uv run pytest -m gpu` runs the real-model test (SDXL, downloads ~7 GB)
 - `uv run ruff check --fix . && uv run ruff format .`: lint and format
 
@@ -30,8 +30,12 @@ Update this file when a convention changes or a new pitfall turns up.
 - Image `i` of a batch uses `seed + i`, so any single image can be reproduced. PNGs embed prompt, model, seed, steps, quantization and transparency as text metadata.
 - Write generated images to `outputs/`, which is gitignored. Animations go to their own folder there (`base.png`, `frame_NN.png`, `animation.*`).
 
-## Transparency and animation
+## Transparency, editing and animation
 - Only presets with `transparency=True` / `editing=True` (Qwen-Image-2.1 and Turbo) support them. Front ends check the flags before loading the model.
+- Editing passes input images as `images=` (up to `MAX_REFERENCES`, 10 per the model card); the pipeline resizes them itself, so don't crop them. Prompts refer to them as `<image1>`, `<image2>`… (the tags the pipeline's template puts before each image). `aspect=None` follows image 1; `"imageN"` follows image N. Open user images with `load_image` (applies EXIF rotation), and record their file names in `GeneratedImage.references`.
+- A `mask` (white = change) applies to image 1 for every model: Qwen gets the area outlined in red (`outline_area`, the model's circle-guided local edits) plus `EDIT_AREA_HINT`; other models inpaint it. Both paste the result over image 1 with `composite`, so image 1 is center-cropped to the output size first.
+- Presets without `editing` fall back to img2img/inpainting via `AutoPipelineFor*.from_pipe` (shares the loaded weights; re-enable CPU offload on the derived pipe). They take one image and a `strength`; `num_inference_steps` is divided by the strength so the model's own step count actually runs.
+- Qwen presets set `vae_tile`: a full VAE decode at 2K peaked at the whole 32 GiB and failed on non-square sizes with "CUDA driver error: device not ready / Failed to create GPU mapping". Tiled, peak is ~21 GiB.
 - Transparency wraps the prompt in `TRANSPARENT_TEMPLATE` (the official Qwen format). The VAE outputs RGBA natively, so don't post-process alpha.
 - Each animation frame is a Qwen edit of the base, the previous frame, or both (`FrameSource`), pasted over the base through the feathered mask. The paste is what guarantees the area outside the mask stays unchanged, not the model.
 - Animated WebP/APNG/GIF encoders merge identical consecutive frames, so use frames that differ in tests.

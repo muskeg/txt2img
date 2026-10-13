@@ -183,5 +183,73 @@ def test_generate_base_fills_the_editor(fake_pipe: MagicMock, small_qwen: None) 
     assert value["layers"] == []
 
 
+def test_input_images_are_passed_and_recorded(
+    fake_pipe: MagicMock, small_qwen: None, tmp_path: Path
+) -> None:
+    Image.new("RGB", (160, 90), "blue").save(dog := tmp_path / "dog.png")
+    editor = {"background": Image.new("RGBA", (160, 90), "red"), "layers": []}
+
+    gallery, memory = generate(
+        "qwen-image-2.1-turbo",
+        aspect=ui.AUTO_ASPECT,
+        count=2,
+        seed=4,
+        editor=editor,
+        references=[(str(dog), None)],
+    )
+
+    assert [caption for _, caption in gallery] == ["seed 4", "seed 5"]
+    kwargs = fake_pipe.call_args.kwargs
+    assert [i.getpixel((0, 0))[:3] for i in kwargs["image"]] == [(255, 0, 0), (0, 0, 255)]
+    assert (kwargs["width"], kwargs["height"]) == (128, 72)  # follows image 1's 16:9
+    with Image.open(next(tmp_path.glob("*_qwen-image-2.1-turbo_4.png"))) as png:
+        assert png.text["references"] == "(editor), dog.png"
+    assert "Peak during generation" in memory
+
+
+def test_painted_area_becomes_the_mask(fake_pipe: MagicMock, tmp_path: Path) -> None:
+    layer = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+    layer.paste((255, 0, 0, 255), (0, 0, 32, 64))
+    editor = {"background": Image.new("RGBA", (64, 64), "white"), "layers": [layer]}
+
+    generate("sdxl", editor=editor, strength=0.8)
+
+    kwargs = fake_pipe.inpaint.call_args.kwargs
+    assert kwargs["strength"] == 0.8
+    assert kwargs["mask_image"].getpixel((10, 500)) == 255
+    assert kwargs["mask_image"].getpixel((1000, 500)) == 0
+    with Image.open(next(tmp_path.glob("*.png"))) as png:
+        assert png.text["mask"] == "painted"
+
+
+def test_several_images_need_an_editing_model(fake_pipe: MagicMock, tmp_path: Path) -> None:
+    Image.new("RGB", (8, 8)).save(extra := tmp_path / "extra.png")
+    editor = {"background": Image.new("RGBA", (8, 8)), "layers": []}
+
+    with pytest.raises(gr.Error, match="takes one input image"):
+        generate("sdxl", editor=editor, references=[(str(extra), None)])
+
+
+def test_generation_errors_become_ui_errors(fake_pipe: MagicMock) -> None:
+    with pytest.raises(gr.Error, match="needs at least 2 input images"):
+        generate("qwen-image-2.1-turbo", aspect="image2")
+
+
+def test_strength_follows_model() -> None:
+    assert ui._strength_control("sdxl").interactive
+    assert not ui._strength_control("qwen-image-2.1-turbo").interactive
+
+
+def test_use_as_input_fills_the_editor_and_opens_inputs(tmp_path: Path) -> None:
+    Image.new("RGB", (8, 8), "red").save(path := tmp_path / "result.png")
+
+    value, accordion = ui.use_as_input([(str(path), "seed 1")])
+
+    assert value["background"].getpixel((0, 0)) == (255, 0, 0)
+    assert accordion.open is True
+    with pytest.raises(gr.Error):
+        ui.use_as_input(None)
+
+
 def test_ui_builds() -> None:
     assert isinstance(ui.build_ui(), gr.Blocks)

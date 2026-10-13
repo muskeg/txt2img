@@ -9,13 +9,14 @@ from huggingface_hub.errors import GatedRepoError
 from PIL import Image
 
 from txt2img import pipeline
-from txt2img.config import GiB, Placement, Quantization
+from txt2img.config import EDIT_AREA_HINT, GiB, Placement, Quantization
 from txt2img.pipeline import (
     GeneratedImage,
     GPUUnavailableError,
     ImageGenerator,
     MemoryReport,
     ModelAccessError,
+    load_image,
     save_image,
 )
 
@@ -73,6 +74,19 @@ def test_forced_offload(fake_pipe: MagicMock) -> None:
 
     assert generator.placement == Placement.OFFLOAD
     fake_pipe.enable_model_cpu_offload.assert_called_once()
+
+
+def test_only_qwen_decodes_in_tiles(fake_pipe: MagicMock) -> None:
+    ImageGenerator("sdxl")
+    fake_pipe.vae.enable_tiling.assert_not_called()
+
+    ImageGenerator("qwen-image-2.1-turbo")
+    fake_pipe.vae.enable_tiling.assert_called_once_with(
+        tile_sample_min_height=1024,
+        tile_sample_min_width=1024,
+        tile_sample_stride_height=896,
+        tile_sample_stride_width=896,
+    )
 
 
 def test_4bit_quantizes_the_preset_components(fake_pipe: MagicMock) -> None:
@@ -252,9 +266,157 @@ def test_reference_images_are_passed_to_editing_models(fake_pipe: MagicMock) -> 
     assert fake_pipe.call_args.kwargs["image"] == [reference]
 
 
-def test_reference_images_rejected_for_text_only_models(fake_pipe: MagicMock) -> None:
-    with pytest.raises(ValueError, match="reference images"):
-        ImageGenerator("sdxl").generate("a cat", images=[Image.new("RGB", (8, 8))])
+def test_one_input_image_is_redrawn_by_img2img(fake_pipe: MagicMock) -> None:
+    photo = Image.new("RGBA", (300, 200), "red")
+
+    [result] = ImageGenerator("sdxl").generate("a watercolor", images=[photo], seed=1).images
+
+    fake_pipe.assert_not_called()
+    kwargs = fake_pipe.img2img.call_args.kwargs
+    assert kwargs["image"].size == (1216, 832)  # fitted to the closest 3:2 bucket
+    assert kwargs["image"].mode == "RGB"
+    assert (kwargs["width"], kwargs["height"]) == (1216, 832)
+    assert kwargs["strength"] == 0.6
+    assert kwargs["num_inference_steps"] == 84  # 50 steps actually run at strength 0.6
+    assert (result.strength, result.steps) == (0.6, 50)
+
+
+def test_img2img_strength_and_offload(fake_pipe: MagicMock) -> None:
+    generator = ImageGenerator("sdxl", placement=Placement.OFFLOAD)
+
+    generator.generate("a cat", images=[Image.new("RGB", (64, 64))], strength=0.25, steps=10)
+    generator.generate("a dog", images=[Image.new("RGB", (64, 64))])
+
+    pipeline.AutoPipelineForImage2Image.from_pipe.assert_called_once_with(fake_pipe)
+    fake_pipe.img2img.enable_model_cpu_offload.assert_called_once()
+    first, second = fake_pipe.img2img.call_args_list
+    assert (first.kwargs["strength"], first.kwargs["num_inference_steps"]) == (0.25, 40)
+    assert second.kwargs["strength"] == 0.6
+
+
+def test_mask_inpaints_and_keeps_the_rest_of_the_image(fake_pipe: MagicMock) -> None:
+    base = Image.new("RGB", (100, 100), "red")
+    mask = Image.new("L", (50, 50), 0)  # a different size is scaled to the image
+    mask.paste(255, (0, 0, 25, 50))
+    fake_pipe.inpaint.side_effect = lambda **kwargs: SimpleNamespace(
+        images=[Image.new("RGB", (1024, 1024), "blue")]
+    )
+
+    [result] = ImageGenerator("sdxl").generate("a door", images=[base], mask=mask).images
+
+    kwargs = fake_pipe.inpaint.call_args.kwargs
+    assert kwargs["mask_image"].size == (1024, 1024)
+    assert kwargs["mask_image"].getpixel((10, 500)) == 255
+    assert result.image.getpixel((10, 500))[:3] == (0, 0, 255)
+    assert result.image.getpixel((1000, 500))[:3] == (255, 0, 0)
+
+
+def test_qwen_mask_outlines_the_area_in_red_and_keeps_the_rest(fake_pipe: MagicMock) -> None:
+    base = Image.new("RGB", (2048, 2048), "white")
+    mask = Image.new("L", base.size, 0)
+    mask.paste(255, (800, 800, 1200, 1200))
+    fake_pipe.side_effect = lambda **kwargs: SimpleNamespace(
+        images=[Image.new("RGB", (2048, 2048), "blue")]
+    )
+
+    [result] = (
+        ImageGenerator("qwen-image-2.1-turbo")
+        .generate("Remove the cup.", images=[base], mask=mask)
+        .images
+    )
+
+    kwargs = fake_pipe.call_args.kwargs
+    marked = kwargs["image"][0]
+    assert marked.getpixel((1205, 1000)) == (255, 0, 0, 255)  # just outside the area
+    assert marked.getpixel((1000, 1000)) == (255, 255, 255, 255)  # inside stays visible
+    assert marked.getpixel((100, 100)) == (255, 255, 255, 255)
+    assert kwargs["prompt"] == "Remove the cup. " + EDIT_AREA_HINT
+    assert result.prompt == "Remove the cup."
+    assert result.image.getpixel((1000, 1000))[:3] == (0, 0, 255)
+    assert result.image.getpixel((100, 100))[:3] == (255, 255, 255)
+
+
+def test_aspect_can_follow_any_input_image(fake_pipe: MagicMock) -> None:
+    portrait, landscape = Image.new("RGB", (600, 800)), Image.new("RGB", (1600, 900))
+    generator = ImageGenerator("qwen-image-2.1-turbo")
+
+    generator.generate("swap them", images=[portrait, landscape], aspect="image2")
+
+    kwargs = fake_pipe.call_args.kwargs
+    assert (kwargs["width"], kwargs["height"]) == (2752, 1536)
+    with pytest.raises(ValueError, match="needs at least 3 input images"):
+        generator.generate("swap them", images=[portrait, landscape], aspect="image3")
+
+
+@pytest.mark.parametrize(
+    ("model", "kwargs", "message"),
+    [
+        ("sdxl", {"images": [Image.new("RGB", (8, 8))] * 2}, "takes one input image"),
+        ("sdxl", {"strength": 0.5}, "strength only applies"),
+        ("qwen-image-2.1", {"images": [Image.new("RGB", (8, 8))], "strength": 0.5}, "strength"),
+        ("sdxl", {"images": [Image.new("RGB", (8, 8))], "strength": 1.5}, "between 0 and 1"),
+        ("sdxl", {"mask": Image.new("L", (8, 8), 255)}, "mask needs an input image"),
+        (
+            "sdxl",
+            {"images": [Image.new("RGB", (8, 8))], "mask": Image.new("L", (8, 8), 0)},
+            "white area",
+        ),
+    ],
+)
+def test_invalid_input_image_arguments(
+    fake_pipe: MagicMock, model: str, kwargs: dict, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        ImageGenerator(model).generate("a cat", **kwargs)
+
+
+def test_aspect_defaults_to_first_reference_image(fake_pipe: MagicMock) -> None:
+    portrait, landscape = Image.new("RGB", (600, 800)), Image.new("RGB", (1600, 900))
+
+    ImageGenerator("qwen-image-2.1-turbo").generate("swap them", images=[portrait, landscape])
+
+    kwargs = fake_pipe.call_args.kwargs
+    assert (kwargs["width"], kwargs["height"]) == (1792, 2400)
+
+
+def test_aspect_defaults_to_square_without_references(fake_pipe: MagicMock) -> None:
+    ImageGenerator("sdxl").generate("a cat")
+
+    kwargs = fake_pipe.call_args.kwargs
+    assert (kwargs["width"], kwargs["height"]) == (1024, 1024)
+
+
+def test_too_many_reference_images(fake_pipe: MagicMock) -> None:
+    images = [Image.new("RGB", (8, 8))] * 11
+
+    with pytest.raises(ValueError, match="At most 10"):
+        ImageGenerator("qwen-image-2.1-turbo").generate("a group photo", images=images)
+
+
+def test_load_image_applies_exif_rotation(tmp_path: Path) -> None:
+    exif = Image.Exif()
+    exif[0x0112] = 6  # Orientation: rotate 90 degrees clockwise to display
+    Image.new("RGB", (40, 30)).save(path := tmp_path / "photo.jpg", exif=exif)
+
+    assert load_image(path).size == (30, 40)
+
+
+def test_save_image_records_inputs(tmp_path: Path) -> None:
+    result = GeneratedImage(
+        Image.new("RGB", (8, 8)),
+        "a door",
+        "sdxl",
+        1,
+        50,
+        references=("street.jpg",),
+        mask="mask.png",
+        strength=0.75,
+    )
+
+    with Image.open(save_image(result, tmp_path)) as saved:
+        assert saved.text["references"] == "street.jpg"
+        assert saved.text["mask"] == "mask.png"
+        assert saved.text["strength"] == "0.75"
 
 
 def test_save_image_records_transparency_and_custom_name(tmp_path: Path) -> None:

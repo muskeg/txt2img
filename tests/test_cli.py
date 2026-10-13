@@ -122,6 +122,91 @@ def test_transparent_fails_before_loading_unsupported_model(fake_pipe: MagicMock
     pipeline.DiffusionPipeline.from_pretrained.assert_not_called()
 
 
+def test_image_edits_with_the_default_edit_model(fake_pipe: MagicMock, tmp_path: Path) -> None:
+    Image.new("RGB", (90, 160), "red").save(person := tmp_path / "person.png")
+    Image.new("RGB", (160, 90), "blue").save(beach := tmp_path / "beach.png")
+
+    result = runner.invoke(
+        app,
+        ["the person from image 1 on the beach from image 2", "-i", str(person), "-i", str(beach)]
+        + ["-o", str(tmp_path / "out")],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Loaded qwen-image-2.1-turbo" in result.stderr
+    kwargs = fake_pipe.call_args.kwargs
+    assert [image.getpixel((0, 0)) for image in kwargs["image"]] == [(255, 0, 0), (0, 0, 255)]
+    assert (kwargs["width"], kwargs["height"]) == (1536, 2752)  # 9:16, like image 1
+    [saved] = (tmp_path / "out").iterdir()
+    with Image.open(saved) as png:
+        assert png.text["references"] == "person.png, beach.png"
+
+
+def test_image_with_other_models_is_redrawn_by_strength(
+    fake_pipe: MagicMock, tmp_path: Path
+) -> None:
+    Image.new("RGB", (64, 64)).save(photo := tmp_path / "photo.png")
+
+    result = runner.invoke(
+        app,
+        ["a watercolor", "-m", "sdxl", "-i", str(photo), "--strength", "0.4"]
+        + ["-o", str(tmp_path / "out")],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert fake_pipe.img2img.call_args.kwargs["strength"] == 0.4
+    [saved] = (tmp_path / "out").iterdir()
+    with Image.open(saved) as png:
+        assert (png.text["references"], png.text["strength"]) == ("photo.png", "0.4")
+
+
+def test_mask_limits_the_edit_and_is_recorded(fake_pipe: MagicMock, tmp_path: Path) -> None:
+    Image.new("RGB", (64, 64)).save(photo := tmp_path / "photo.png")
+    Image.new("L", (64, 64), 255).save(mask := tmp_path / "area.png")
+
+    result = runner.invoke(
+        app, ["remove the cup", "-i", str(photo), "--mask", str(mask), "-o", str(tmp_path / "out")]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert fake_pipe.call_args.kwargs["prompt"].startswith("remove the cup Only change")
+    [saved] = (tmp_path / "out").iterdir()
+    with Image.open(saved) as png:
+        assert png.text["mask"] == "area.png"
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["-m", "sdxl", "-i", "{photo}", "-i", "{photo}"],
+        ["-i", "{photo}", "--strength", "0.5"],
+        ["--strength", "0.5"],
+        ["--mask", "{photo}"],
+        ["-i", "{photo}", "-a", "image2"],
+        ["-i", "{photo}", "--mask", "{black}"],
+        ["-m", "sdxl", "-i", "{photo}", "--strength", "0"],
+    ],
+)
+def test_input_image_options_fail_before_loading(
+    fake_pipe: MagicMock, tmp_path: Path, args: list[str]
+) -> None:
+    Image.new("RGB", (8, 8), "white").save(photo := tmp_path / "photo.png")
+    Image.new("L", (8, 8), 0).save(black := tmp_path / "black.png")
+    args = [a.format(photo=photo, black=black) for a in args]
+
+    result = runner.invoke(app, ["make it night", *args])
+
+    assert result.exit_code == 2, result.output
+    pipeline.DiffusionPipeline.from_pretrained.assert_not_called()
+
+
+def test_image_that_is_not_an_image(fake_pipe: MagicMock) -> None:
+    result = runner.invoke(app, ["make it night", "-i", "pyproject.toml"])
+
+    assert result.exit_code == 2
+    pipeline.DiffusionPipeline.from_pretrained.assert_not_called()
+
+
 def test_animate_existing_base_with_mask(
     fake_pipe: MagicMock, small_qwen: None, tmp_path: Path
 ) -> None:

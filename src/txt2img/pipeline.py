@@ -1,4 +1,5 @@
 import itertools
+import math
 import secrets
 from dataclasses import dataclass
 from datetime import datetime
@@ -6,13 +7,23 @@ from pathlib import Path
 
 import diffusers
 import torch
-from diffusers import DiffusionPipeline, PipelineQuantizationConfig
+from diffusers import (
+    AutoPipelineForImage2Image,
+    AutoPipelineForInpainting,
+    DiffusionPipeline,
+    PipelineQuantizationConfig,
+)
 from huggingface_hub.errors import GatedRepoError
-from PIL import Image
+from PIL import Image, ImageChops, ImageFilter, ImageOps
 from PIL.PngImagePlugin import PngInfo
 
 from txt2img.config import (
     DEFAULT_ASPECT,
+    DEFAULT_STRENGTH,
+    EDIT_AREA_HINT,
+    FOLLOW_ASPECTS,
+    MASK_FEATHER,
+    MAX_REFERENCES,
     MODELS,
     TRANSPARENT_TEMPLATE,
     VRAM_HEADROOM,
@@ -33,6 +44,46 @@ class ModelAccessError(RuntimeError):
 
 def gib(n: int) -> str:
     return f"{n / GiB:.1f} GiB"
+
+
+def closest_aspect(size: tuple[int, int], resolutions: dict[str, tuple[int, int]]) -> str:
+    ratio = size[0] / size[1]
+
+    def distance(aspect: str) -> float:
+        width, height = resolutions[aspect]
+        return abs(math.log(width / height / ratio))
+
+    return min(resolutions, key=distance)
+
+
+def load_image(path: Path) -> Image.Image:
+    """Open an image upright: phone photos store their rotation in EXIF."""
+    with Image.open(path) as image:
+        return ImageOps.exif_transpose(image)
+
+
+def composite(
+    base: Image.Image, frame: Image.Image, mask: Image.Image | None, feather: int
+) -> Image.Image:
+    """Keep `base` outside the mask (white = changed), blending over `feather` pixels."""
+    frame = frame.convert("RGBA")
+    if frame.size != base.size:
+        frame = frame.resize(base.size, Image.Resampling.LANCZOS)
+    if mask is None:
+        return frame
+    soft = mask.convert("L").resize(base.size)
+    if feather:
+        soft = soft.filter(ImageFilter.GaussianBlur(feather))
+    return Image.composite(frame, base.convert("RGBA"), soft)
+
+
+def outline_area(image: Image.Image, mask: Image.Image) -> Image.Image:
+    """Draw a red outline just outside the mask's white area."""
+    width = max(4, min(image.size) // 160)
+    grown = mask.filter(ImageFilter.GaussianBlur(width)).point(lambda v: 255 if v > 16 else 0)
+    marked = image.convert("RGBA")
+    marked.paste((255, 0, 0, 255), mask=ImageChops.subtract(grown, mask))
+    return marked
 
 
 @dataclass(frozen=True)
@@ -89,6 +140,11 @@ class GeneratedImage:
     # Local checkpoint file name and "name:strength" LoRAs, when used.
     checkpoint: str | None = None
     loras: tuple[str, ...] = ()
+    # File names of the reference images; set by the front end, which knows them.
+    references: tuple[str, ...] = ()
+    mask: str | None = None
+    # How much an input image was redrawn, for models without edit instructions.
+    strength: float | None = None
 
 
 @dataclass(frozen=True)
@@ -180,11 +236,20 @@ class ImageGenerator:
                     str(path.parent), weight_name=path.name, adapter_name=name
                 )
             self.pipe.set_adapters(names, adapter_weights=[scale for _, scale in self.loras])
+        if tile := self.preset.vae_tile:
+            # At 2K the full decode peaks above 30 GiB; tiles overlap by 1/8 to hide seams.
+            self.pipe.vae.enable_tiling(
+                tile_sample_min_height=tile,
+                tile_sample_min_width=tile,
+                tile_sample_stride_height=tile * 7 // 8,
+                tile_sample_stride_width=tile * 7 // 8,
+            )
         self.placement = self._resolve_placement(self.requested_placement)
         if self.placement == Placement.GPU:
             self.pipe.to("cuda")
         else:
             self.pipe.enable_model_cpu_offload()
+        self._derived: dict[type, DiffusionPipeline] = {}
         self.load_memory = self._memory_report(torch.cuda.memory_reserved())
 
     def _load(self, models_dir: Path | None) -> DiffusionPipeline:
@@ -221,33 +286,76 @@ class ImageGenerator:
         offloaded = self.placement == Placement.OFFLOAD
         return MemoryReport(gpu, cpu, offloaded, vram_used, self._vram_other, self._vram_total)
 
+    def _derived_pipe(self, auto_cls: type) -> DiffusionPipeline:
+        """Img2img or inpainting pipeline sharing the loaded weights."""
+        if auto_cls not in self._derived:
+            pipe = auto_cls.from_pipe(self.pipe)
+            if self.placement == Placement.OFFLOAD:
+                pipe.enable_model_cpu_offload()
+            self._derived[auto_cls] = pipe
+        return self._derived[auto_cls]
+
+    def _resolve_aspect(self, aspect: str | None, images: list[Image.Image]) -> str:
+        if aspect is None:
+            aspect = FOLLOW_ASPECTS[0] if images else DEFAULT_ASPECT
+        if aspect in FOLLOW_ASPECTS:
+            index = FOLLOW_ASPECTS.index(aspect)
+            if index >= len(images):
+                raise ValueError(f"Aspect {aspect} needs at least {index + 1} input images.")
+            return closest_aspect(images[index].size, self.preset.resolutions)
+        if aspect not in self.preset.resolutions:
+            raise ValueError(
+                f"Unknown aspect {aspect!r}, expected one of {list(self.preset.resolutions)} "
+                "or imageN"
+            )
+        return aspect
+
     def generate(
         self,
         prompt: str,
         *,
-        aspect: str = DEFAULT_ASPECT,
+        aspect: str | None = None,
         seed: int | None = None,
         steps: int | None = None,
         count: int = 1,
         transparent: bool = False,
         images: list[Image.Image] | None = None,
+        mask: Image.Image | None = None,
+        strength: float | None = None,
         negative_prompt: str | None = None,
         guidance: float | None = None,
     ) -> Generation:
         """Generate `count` images; image i uses seed + i so each one can be reproduced alone.
 
-        `images` are reference images the model edits from (editing models only).
+        `images` are input images, called <image1>, <image2>... in the prompt. Editing models
+        follow the prompt as an instruction; other models redraw the single input image by
+        `strength` (0-1). `mask` (white = change) limits changes to that area of image 1.
+        `aspect` is a ratio such as "16:9", or "imageN" to follow input image N; None follows
+        image 1, or uses the default without images.
         `negative_prompt=None` uses the preset's default; "" uses none.
         """
-        resolutions = self.preset.resolutions
-        if aspect not in resolutions:
-            raise ValueError(f"Unknown aspect {aspect!r}, expected one of {list(resolutions)}")
+        images = list(images or [])
+        editing = self.preset.editing
         if count < 1:
             raise ValueError("count must be at least 1")
         if transparent and not self.preset.transparency:
             raise ValueError(f"The {self.model} model can't generate transparent images.")
-        if images and not self.preset.editing:
-            raise ValueError(f"The {self.model} model doesn't accept reference images.")
+        if len(images) > MAX_REFERENCES:
+            raise ValueError(f"At most {MAX_REFERENCES} input images are supported.")
+        if len(images) > 1 and not editing:
+            raise ValueError(
+                f"The {self.model} model takes one input image; "
+                "use a Qwen-Image-2.1 model to combine several."
+            )
+        if mask is not None and (not images or mask.convert("L").getbbox() is None):
+            raise ValueError("The mask needs an input image and some white area.")
+        if strength is not None:
+            if editing or not images:
+                raise ValueError(
+                    "strength only applies to models without edit instructions, with an image."
+                )
+            if not 0 < strength <= 1:
+                raise ValueError("strength must be between 0 and 1")
         if negative_prompt and not self.preset.supports_negative:
             raise ValueError(f"The {self.model} model doesn't take a negative prompt.")
         if guidance is not None and not self.preset.adjustable_guidance:
@@ -261,13 +369,11 @@ class ImageGenerator:
             if steps < 1:
                 raise ValueError("steps must be at least 1")
         steps = steps or self.preset.default_steps
-        width, height = resolutions[aspect]
+        width, height = self.preset.resolutions[self._resolve_aspect(aspect, images)]
         base_seed = secrets.randbelow(2**32) if seed is None else seed
         call_kwargs = dict(self.preset.call_kwargs)
         if steps is not None:
             call_kwargs["num_inference_steps"] = steps
-        if images:
-            call_kwargs["image"] = images
         if guidance is not None:
             call_kwargs["guidance_scale"] = guidance
         negative = self.preset.default_negative if negative_prompt is None else negative_prompt
@@ -275,6 +381,31 @@ class ImageGenerator:
             call_kwargs["negative_prompt"] = negative
         prefix = self.preset.prompt_prefix
         model_prompt = f"{prefix}, {prompt}" if prefix else prompt
+
+        pipe, canvas = self.pipe, None
+        if images and (mask is not None or not editing):
+            # The output is pasted over image 1 or redrawn from it, so it must be the same size.
+            canvas = ImageOps.fit(images[0], (width, height), Image.Resampling.LANCZOS)
+        if mask is not None:
+            mask = mask.convert("L").resize(images[0].size)
+            mask = ImageOps.fit(mask, (width, height), Image.Resampling.LANCZOS)
+            mask = mask.point(lambda v: 255 if v >= 128 else 0)
+        if images and editing:
+            if mask is not None:
+                images[0] = outline_area(canvas, mask)
+                model_prompt = f"{model_prompt.strip()} {EDIT_AREA_HINT}"
+            call_kwargs["image"] = images
+        elif images:
+            pipe = self._derived_pipe(
+                AutoPipelineForImage2Image if mask is None else AutoPipelineForInpainting
+            )
+            strength = DEFAULT_STRENGTH if strength is None else strength
+            call_kwargs.update(image=canvas.convert("RGB"), strength=strength)
+            if mask is not None:
+                call_kwargs["mask_image"] = mask
+            if steps is not None:
+                # Img2img runs only the last `strength` share of the steps; keep the model's count.
+                call_kwargs["num_inference_steps"] = math.ceil(steps / strength)
         if transparent:
             model_prompt = TRANSPARENT_TEMPLATE.format(prompt=model_prompt.strip().rstrip("."))
 
@@ -282,16 +413,19 @@ class ImageGenerator:
         images_out = []
         for i in range(count):
             image_seed = base_seed + i
-            output = self.pipe(
+            output = pipe(
                 prompt=model_prompt,
                 width=width,
                 height=height,
                 generator=torch.Generator("cpu").manual_seed(image_seed),
                 **call_kwargs,
             )
+            image = output.images[0]
+            if mask is not None:
+                image = composite(canvas, image, mask, MASK_FEATHER)
             images_out.append(
                 GeneratedImage(
-                    image=output.images[0],
+                    image=image,
                     prompt=prompt,
                     model=self.model,
                     seed=image_seed,
@@ -302,6 +436,7 @@ class ImageGenerator:
                     guidance=call_kwargs.get("guidance_scale"),
                     checkpoint=self.checkpoint.name if self.checkpoint else None,
                     loras=tuple(f"{path.stem}:{scale:g}" for path, scale in self.loras),
+                    strength=call_kwargs.get("strength"),
                 )
             )
         return Generation(images_out, self._memory_report(torch.cuda.max_memory_reserved()))
@@ -330,5 +465,11 @@ def save_image(result: GeneratedImage, output_dir: Path, name: str | None = None
         info.add_text("checkpoint", result.checkpoint)
     if result.loras:
         info.add_text("loras", ", ".join(result.loras))
+    if result.references:
+        info.add_text("references", ", ".join(result.references))
+    if result.mask:
+        info.add_text("mask", result.mask)
+    if result.strength is not None:
+        info.add_text("strength", f"{result.strength:g}")
     result.image.save(path, pnginfo=info)
     return path

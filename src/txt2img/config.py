@@ -43,7 +43,7 @@ class ModelPreset:
     gated: bool = False
     # Native RGBA output, prompted with TRANSPARENT_TEMPLATE.
     transparency: bool = False
-    # Accepts reference images (`image=`), which animation frames are edited from.
+    # Accepts reference images (`image=`) to edit or take people/objects from.
     editing: bool = False
     # (diffusers scheduler class, config overrides) replacing the repo's own scheduler.
     scheduler: tuple[str, dict[str, object]] | None = None
@@ -56,6 +56,8 @@ class ModelPreset:
     single_file: str | None = None
     # Pipeline class for single-file weights: the preset's own or a local --checkpoint.
     checkpoint_pipeline: str | None = None
+    # VAE tile size in pixels, when decoding the whole image at once doesn't fit in VRAM.
+    vae_tile: int | None = None
 
     @property
     def adjustable_guidance(self) -> bool:
@@ -105,6 +107,7 @@ MODELS: dict[str, ModelPreset] = {
         quantizable=("transformer", "text_encoder"),
         transparency=True,
         editing=True,
+        vae_tile=1024,
     ),
     "qwen-image-2.1-turbo": ModelPreset(
         "Qwen/Qwen-Image-2.1-Turbo",
@@ -114,6 +117,7 @@ MODELS: dict[str, ModelPreset] = {
         quantizable=("transformer", "text_encoder"),
         transparency=True,
         editing=True,
+        vae_tile=1024,
     ),
     "flux.1-schnell": ModelPreset(
         "black-forest-labs/FLUX.1-schnell",
@@ -280,6 +284,15 @@ MODELS: dict[str, ModelPreset] = {
 }
 DEFAULT_MODEL = "z-image-turbo"
 DEFAULT_EDIT_MODEL = "qwen-image-2.1-turbo"
+# Limit from the Qwen-Image-2.1 model card.
+MAX_REFERENCES = 10
+# Aspect values that follow input image N's ratio; Qwen prompts call that image <imageN>.
+FOLLOW_ASPECTS = [f"image{i}" for i in range(1, MAX_REFERENCES + 1)]
+# How much models without edit instructions redraw an input image (diffusers' default).
+DEFAULT_STRENGTH = 0.6
+# Qwen-Image-2.1 is trained on circled local edits; the mask's outline is drawn in red.
+EDIT_AREA_HINT = "Only change the area outlined in red, and remove the red outline."
+MASK_FEATHER = 8
 
 
 class Placement(StrEnum):
